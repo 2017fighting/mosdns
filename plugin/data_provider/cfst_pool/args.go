@@ -55,6 +55,13 @@ type Args struct {
 	Seed int64 `yaml:"seed"`
 	// CIDRs overrides the built-in Cloudflare list. Empty = use built-ins.
 	CIDRs []string `yaml:"cidrs"`
+	// FWMark is the Linux SO_MARK value applied to every probe socket
+	// (both TCP ping and HTTP download). Non-zero lets an operator write
+	// an ip-rule/iptables exemption on a router with a global proxy so
+	// the speed-test traffic bypasses the proxy — measuring it through
+	// the proxy would defeat the entire point of cfst. Zero (default)
+	// leaves the socket unmarked. No-op on non-Linux.
+	FWMark uint32 `yaml:"fwmark"`
 }
 
 // applyDefaults fills in zero-valued fields with the documented defaults.

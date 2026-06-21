@@ -6,6 +6,8 @@ import (
 	"net/netip"
 	"sync"
 	"time"
+
+	"github.com/IrineSistiana/mosdns/v5/plugin/data_provider/cfst_pool/internal/sockmark"
 )
 
 // Result is the latency measurement for one IP.
@@ -25,6 +27,10 @@ type Probe struct {
 	Timeout time.Duration
 	// Port is the TCP port to probe (e.g. 443).
 	Port uint16
+	// FWMark is applied to each probe socket via SO_MARK on Linux. Zero
+	// leaves the socket unmarked. Used to bypass router-level proxies
+	// that would invalidate the measurement.
+	FWMark uint32
 }
 
 // Probe returns one Result per input addr, in input order. Unreachable IPs
@@ -69,9 +75,16 @@ func (p Probe) probeOne(addr netip.Addr) Result {
 	var lastErr error
 	successes := 0
 	ap := netip.AddrPortFrom(addr, p.Port)
+	// Dialer (vs net.DialTimeout) so we can install a Control hook that
+	// applies SO_MARK before connect(). FWMark=0 → Control returns nil →
+	// net.Dialer skips the callback, zero overhead on the unmarked path.
+	dialer := &net.Dialer{
+		Timeout:  p.Timeout,
+		Control:  sockmark.Control(p.FWMark),
+	}
 	for i := 0; i < p.PingTimes; i++ {
 		start := time.Now()
-		conn, err := net.DialTimeout("tcp", ap.String(), p.Timeout)
+		conn, err := dialer.Dial("tcp", ap.String())
 		elapsed := time.Since(start)
 		if err != nil {
 			lastErr = err

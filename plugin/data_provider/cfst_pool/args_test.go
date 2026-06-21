@@ -72,3 +72,30 @@ func TestArgs_RequiredFieldsMissing(t *testing.T) {
 		t.Fatal("expected error for missing download_url")
 	}
 }
+
+func TestArgs_FWMarkParses(t *testing.T) {
+	yaml := `
+download_url: https://cfst.raenzo.com/test
+fwmark: 0x1
+`
+	a, err := ParseArgs([]byte(yaml))
+	if err != nil {
+		t.Fatalf("ParseArgs: %v", err)
+	}
+	if a.FWMark != 1 {
+		t.Errorf("FWMark: want 1, got %d", a.FWMark)
+	}
+}
+
+func TestArgs_FWMarkDefaultsToZero(t *testing.T) {
+	yaml := `
+download_url: https://cfst.raenzo.com/test
+`
+	a, err := ParseArgs([]byte(yaml))
+	if err != nil {
+		t.Fatalf("ParseArgs: %v", err)
+	}
+	if a.FWMark != 0 {
+		t.Errorf("FWMark: want 0 when omitted, got %d", a.FWMark)
+	}
+}

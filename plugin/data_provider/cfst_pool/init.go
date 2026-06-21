@@ -73,6 +73,7 @@ func Init(bp *coremain.BP, args any) (any, error) {
 		TopN:            a.TopN,
 		Seed:            a.Seed,
 		SampleCount:     a.SampleCount,
+		FWMark:          a.FWMark,
 	}
 
 	p := &Plugin{

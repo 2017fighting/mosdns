@@ -1,8 +1,11 @@
 package tcping
 
 import (
+	"errors"
 	"net"
 	"net/netip"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -106,5 +109,47 @@ func TestProbe_ConcurrencyBounded(t *testing.T) {
 		if r.Err != nil {
 			t.Errorf("unexpected error for %v: %v", r.Addr, r.Err)
 		}
+	}
+}
+
+// TestProbe_FWMarkExercisesControl verifies that a non-zero FWMark wires
+// through to the dialer's Control hook. On Linux this actually calls
+// setsockopt(SO_MARK), which requires CAP_NET_ADMIN — without that
+// capability the kernel returns EPERM, which we tolerate (and skip) since
+// it proves the wiring is correct and only privileges are missing. On
+// non-Linux (macOS dev) Control is a no-op, so the probe must succeed.
+func TestProbe_FWMarkExercisesControl(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+
+	p := Probe{
+		PingTimes: 1,
+		Routines:  1,
+		Timeout:   500 * time.Millisecond,
+		Port:      uint16(ln.Addr().(*net.TCPAddr).Port),
+		FWMark:    0x1,
+	}
+	results := p.Probe([]netip.Addr{netip.MustParseAddr("127.0.0.1")})
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.Err != nil {
+		if errors.Is(r.Err, syscall.EPERM) || strings.Contains(r.Err.Error(), "operation not permitted") {
+			t.Skipf("SO_MARK failed (no CAP_NET_ADMIN); wiring is correct: %v", r.Err)
+		}
+		t.Fatalf("unexpected error: %v", r.Err)
 	}
 }

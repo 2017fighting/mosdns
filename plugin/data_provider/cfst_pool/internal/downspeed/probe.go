@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/VividCortex/ewma"
+
+	"github.com/IrineSistiana/mosdns/v5/plugin/data_provider/cfst_pool/internal/sockmark"
 )
 
 // Result is the download measurement for one IP.
@@ -31,6 +33,10 @@ type Probe struct {
 	Port uint16
 	// DownloadMB is informational only — we read until Timeout elapses.
 	DownloadMB int
+	// FWMark is applied to the dial socket via SO_MARK on Linux. Zero
+	// leaves the socket unmarked. Used to bypass router-level proxies
+	// that would invalidate the throughput measurement.
+	FWMark uint32
 }
 
 // Probe measures throughput for one IP against testURL (whose Host is rewritten
@@ -47,7 +53,9 @@ func (p Probe) Probe(dialIP string, testURL string, addr netip.Addr) Result {
 		return r
 	}
 
-	dialer := &net.Dialer{}
+	dialer := &net.Dialer{
+		Control: sockmark.Control(p.FWMark),
+	}
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			port := p.Port

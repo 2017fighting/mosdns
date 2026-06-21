@@ -47,6 +47,11 @@ type Runner struct {
 
 	// SampleCount: how many IPs to draw per family before probing.
 	SampleCount int
+
+	// FWMark is applied to every probe socket via SO_MARK on Linux.
+	// Zero leaves sockets unmarked. Used to bypass router-level proxies
+	// that would invalidate the measurement.
+	FWMark uint32
 }
 
 // Run executes the pipeline and returns the selected IPs.
@@ -90,6 +95,7 @@ func (r Runner) Run() (dp.FastIPSet, error) {
 		Routines:  r.Routines,
 		Timeout:   tcpTimeout,
 		Port:      r.Port,
+		FWMark:    r.FWMark,
 	}
 	v4Reach := tcp.Probe(v4Addrs)
 	v6Reach := tcp.Probe(v6Addrs)
@@ -102,6 +108,7 @@ func (r Runner) Run() (dp.FastIPSet, error) {
 		Timeout: dlTimeout,
 		HTTPS:   r.HTTPS,
 		Port:    r.Port,
+		FWMark:  r.FWMark,
 	}
 
 	topN := r.TopN

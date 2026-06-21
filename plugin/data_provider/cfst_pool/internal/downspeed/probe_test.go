@@ -1,10 +1,12 @@
 package downspeed
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -66,5 +68,33 @@ func TestProbe_AbortsOnTimeout(t *testing.T) {
 	r := p.Probe("127.0.0.1", srv.URL, netip.MustParseAddr("127.0.0.1"))
 	if r.Err == nil {
 		t.Errorf("expected timeout error, got nil (BytesPerSec=%v)", r.BytesPerSec)
+	}
+}
+
+// TestProbe_FWMarkExercisesControl verifies that a non-zero FWMark wires
+// through to the dialer's Control hook. On Linux SO_MARK requires
+// CAP_NET_ADMIN; without it the kernel returns EPERM, which we tolerate
+// (skip) since the wiring itself is correct. On macOS the Control hook is
+// a no-op so the probe must succeed end-to-end.
+func TestProbe_FWMarkExercisesControl(t *testing.T) {
+	payload := strings.Repeat("x", 1<<20)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer srv.Close()
+
+	p := Probe{
+		Timeout:    2 * time.Second,
+		HTTPS:      false,
+		Port:       0,
+		DownloadMB: 1,
+		FWMark:     0x1,
+	}
+	r := p.Probe("127.0.0.1", srv.URL, netip.MustParseAddr("127.0.0.1"))
+	if r.Err != nil {
+		if errors.Is(r.Err, syscall.EPERM) || strings.Contains(r.Err.Error(), "operation not permitted") {
+			t.Skipf("SO_MARK failed (no CAP_NET_ADMIN); wiring is correct: %v", r.Err)
+		}
+		t.Fatalf("unexpected error: %v", r.Err)
 	}
 }

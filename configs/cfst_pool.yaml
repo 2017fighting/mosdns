@@ -39,6 +39,15 @@ plugins:
       cache_file: /var/lib/mosdns/cfst_pool.json
       ipv6: false
       seed: 42
+      # fwmark is applied via SO_MARK to every probe socket so the test
+      # traffic can be exempted from a router-level global proxy.
+      # Without this, the proxy intercepts the probes and the speed
+      # measurement reflects the proxy's path, not the real edge latency.
+      # Pair with an ip-rule like:
+      #   ip rule add fwmark 0x1 table 100
+      #   ip route add default via <gateway> table 100
+      # Set to 0 (or omit) to leave sockets unmarked. Linux-only.
+      fwmark: 0x1
 
   # Cloudflare CIDR matcher (existing mosdns plugin). Used to identify whether
   # a response IP belongs to Cloudflare so we know to apply lpush.
