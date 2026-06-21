@@ -65,8 +65,11 @@ refresh_interval: 1
 	}
 }
 
-func TestInitNoCacheFail(t *testing.T) {
-	// Test: no cache, first scan fails, should return error
+func TestInitAsyncSucceedsWithoutCache(t *testing.T) {
+	// Async contract: Init must not block on the first scan and must not
+	// fail mosdns startup just because the scan cannot reach the URL.
+	// Without a cache, GetFastIPs returns an empty snapshot until the
+	// background scan populates the set.
 	argsYAML := `
 download_url: http://invalid.invalid
 sample_count: 10
@@ -85,13 +88,25 @@ refresh_interval: 1
 
 	plugins := make(map[string]any)
 	m := coremain.NewTestMosdnsWithPlugins(plugins)
-	bp := coremain.NewBP("test_no_cache_fail", m)
+	bp := coremain.NewBP("test_async_no_cache", m)
 
-	// Init should fail
-	_, err = Init(bp, &args)
-	if err == nil {
-		t.Error("Init should fail when no cache and scan fails")
+	// Init must return well before a 1-second scan could finish.
+	start := time.Now()
+	pluginAny, err := Init(bp, &args)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Init must succeed asynchronously: %v", err)
 	}
+	if elapsed > 200*time.Millisecond {
+		t.Errorf("Init blocked for %v; expected to return without waiting for scan", elapsed)
+	}
+
+	plugin := pluginAny.(*Plugin)
+	defer plugin.Close()
+
+	// Snapshot may be empty (scan hasn't completed or failed). Either way
+	// it must be safe to read.
+	_ = plugin.GetFastIPs()
 }
 
 func TestPluginImplementsFastIPProvider(t *testing.T) {

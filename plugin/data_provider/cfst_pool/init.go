@@ -29,14 +29,17 @@ func init() {
 //
 // High-level behavior:
 //   - Parse args.
-//   - If CacheFile set and exists, load it into current atomic pointer.
-//   - Run first scan synchronously.
-//   -   - If first scan fails AND cache was loaded, log warning and keep cache.
-//   -   - If first scan fails AND no cache, return error.
-//   -   - Otherwise store scan result, persist to cache.
-//   - Start background refresh loop (ticker).
+//   - If CacheFile set and exists, load it synchronously into the atomic
+//     pointer (fast file I/O; no network).
+//   - Start the background refresh loop. The first scan runs immediately
+//     inside the loop — Init does NOT block on it. This lets mosdns bind
+//     its UDP/TCP servers right away while the scan runs in the background.
 //   - Start SIGUSR1 handler.
 //   - Return *Plugin.
+//
+// Async contract: Init never fails because of a scan failure. If no cache
+// is loaded, GetFastIPs returns an empty FastIPSet until the background
+// scan populates the pointer.
 func Init(bp *coremain.BP, args any) (any, error) {
 	a, ok := args.(*Args)
 	if !ok {
@@ -79,46 +82,25 @@ func Init(bp *coremain.BP, args any) (any, error) {
 		doneCh: make(chan struct{}),
 	}
 
-	// Load cache if configured and exists
-	haveCache := false
+	// Load cache if configured and exists. This is the only synchronous I/O
+	// before returning — it is a local file read and runs in microseconds.
+	// On a hit, callers see the cached set immediately; on a miss, callers
+	// see an empty set until the background scan completes.
 	if a.CacheFile != "" {
 		if data, err := cachefile.Load(a.CacheFile); err == nil {
 			set := convertCacheToSet(data)
 			p.current.Store(&set)
-			haveCache = true
 			bp.L().Info("cfst_pool: loaded cache",
 				zap.String("file", a.CacheFile),
 				zap.Int("ipv4", len(set.IPv4)),
 				zap.Int("ipv6", len(set.IPv6)))
 		}
-	}
-
-	// Cold start: run first scan synchronously
-	set, err := p.runner.Run()
-	if err != nil {
-		if haveCache {
-			bp.L().Warn("cfst_pool: cold start scan failed, using cache", zap.Error(err))
-		} else {
-			return nil, fmt.Errorf("cfst_pool: cold start scan failed (no cache): %w", err)
-		}
 	} else {
-		// Non-zero speed contract: if entire scan returns empty, keep last set (or cache)
-		if len(set.IPv4) == 0 && len(set.IPv6) == 0 {
-			if p.current.Load() != nil {
-				bp.L().Warn("cfst_pool: cold start produced empty set, keeping cache")
-			} else {
-				return nil, fmt.Errorf("cfst_pool: cold start produced empty set (no cache to fall back)")
-			}
-		} else {
-			p.current.Store(&set)
-			p.persist(bp)
-			bp.L().Info("cfst_pool: cold start complete",
-				zap.Int("ipv4", len(set.IPv4)),
-				zap.Int("ipv6", len(set.IPv6)))
-		}
+		bp.L().Info("cfst_pool: no cache configured; serving empty set until first scan completes")
 	}
 
-	// Start background refresh loop
+	// Start background refresh loop. The loop performs the first scan
+	// immediately on entry, then ticks on RefreshInterval.
 	go p.refreshLoop(bp)
 
 	// Start SIGUSR1 handler
@@ -129,6 +111,12 @@ func Init(bp *coremain.BP, args any) (any, error) {
 
 func (p *Plugin) refreshLoop(bp *coremain.BP) {
 	defer close(p.doneCh)
+
+	// Immediate cold-start scan. Runs in the background so mosdns can bind
+	// UDP/TCP ports without waiting for it. Failure is logged and retried
+	// on the next tick; the last good set (or cache) is preserved.
+	p.refresh(bp)
+
 	ticker := time.NewTicker(time.Duration(p.args.RefreshInterval) * time.Second)
 	defer ticker.Stop()
 	for {
