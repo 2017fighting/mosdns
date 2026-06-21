@@ -106,3 +106,58 @@ func TestSampler_InvalidCIDR(t *testing.T) {
 		t.Fatal("expected error for invalid CIDR")
 	}
 }
+
+// TestSampler_IPv4ExcludesPrefix verifies sampled candidates never fall in an
+// excluded prefix. The WARP/gateway blocks (e.g. 162.159.192.0/18) pass TCP-443
+// but don't serve proxied customer domains — presenting a *.cloudflareclient.com
+// cert — so they must be filtered out before wasting download-probe slots.
+func TestSampler_IPv4ExcludesPrefix(t *testing.T) {
+	// Sample a /16 but exclude its lower half (/17). Without filtering,
+	// ~half the samples land in the excluded range, so this reliably
+	// catches a missing exclude check (0.5^100 ≈ 0 chance of false green).
+	s := New(42)
+	s.Excludes = []netip.Prefix{netip.MustParsePrefix("10.0.0.0/17")}
+	got, err := s.SampleIPv4([]string{"10.0.0.0/16"}, 100)
+	if err != nil {
+		t.Fatalf("SampleIPv4: %v", err)
+	}
+	if len(got) != 100 {
+		t.Fatalf("want 100 IPs, got %d", len(got))
+	}
+	for _, ip := range got {
+		if s.Excludes[0].Contains(ip) {
+			t.Errorf("sampled IP %s falls in excluded prefix %s", ip, s.Excludes[0])
+		}
+	}
+}
+
+// TestCloudflareWARPExcludes_Parse ensures the built-in WARP exclude list is
+// syntactically valid and covers a known WARP endpoint (engage.cloudflareclient.com
+// resolves inside 162.159.192.0/24) plus the masque cert IP observed in the wild.
+func TestCloudflareWARPExcludes_Parse(t *testing.T) {
+	if len(CloudflareWARPExcludes) == 0 {
+		t.Fatal("CloudflareWARPExcludes must not be empty")
+	}
+	coversEngage := false
+	coversObserved := false
+	observed := netip.MustParseAddr("162.159.199.159")
+	for _, c := range CloudflareWARPExcludes {
+		pfx, err := netip.ParsePrefix(c)
+		if err != nil {
+			t.Errorf("invalid WARP exclude CIDR %q: %v", c, err)
+			continue
+		}
+		if pfx.Contains(netip.MustParseAddr("162.159.192.1")) {
+			coversEngage = true
+		}
+		if pfx.Contains(observed) {
+			coversObserved = true
+		}
+	}
+	if !coversEngage {
+		t.Error("WARP excludes do not cover engage.cloudflareclient.com (162.159.192.1)")
+	}
+	if !coversObserved {
+		t.Error("WARP excludes do not cover observed masque cert IP 162.159.199.159")
+	}
+}

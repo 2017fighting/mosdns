@@ -55,6 +55,11 @@ type Args struct {
 	Seed int64 `yaml:"seed"`
 	// CIDRs overrides the built-in Cloudflare list. Empty = use built-ins.
 	CIDRs []string `yaml:"cidrs"`
+	// CIDRExcludes are prefixes to exclude from sampling. Omit (nil) to get
+	// the built-in WARP/gateway block (recommended; those ranges pass TCP
+	// but don't serve proxied customer domains); set to [] to disable; or
+	// list your own to replace the default.
+	CIDRExcludes []string `yaml:"cidr_excludes"`
 	// FWMark is the Linux SO_MARK value applied to every probe socket
 	// (both TCP ping and HTTP download). Non-zero lets an operator write
 	// an ip-rule/iptables exemption on a router with a global proxy so

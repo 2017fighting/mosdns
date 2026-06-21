@@ -32,3 +32,20 @@ var CloudflareIPv6CIDRs = []string{
 	"2a06:98c0::/29",
 	"2c0f:f248::/32",
 }
+
+// CloudflareWARPExcludes are IPv4 prefixes that terminate TLS with a
+// *.cloudflareclient.com certificate and do NOT serve proxied customer
+// domains. They pass a TCP-443 connect probe but fail the download probe
+// (cert mismatch / reset), wasting candidate slots and occasionally tipping
+// an already-thin pool to empty.
+//
+// 162.159.192.0/18 covers the consumer WARP client block
+// (engage.cloudflareclient.com → 162.159.192.1, per Cloudflare's firewall
+// docs) and the masque/gateway addresses observed in the wild
+// (e.g. 162.159.199.159 presenting masque.cloudflareclient.com).
+//
+// Applied by default by the runner. Override via Args.CIDRExcludes; set to
+// an empty list to disable exclusion entirely.
+var CloudflareWARPExcludes = []string{
+	"162.159.192.0/18",
+}

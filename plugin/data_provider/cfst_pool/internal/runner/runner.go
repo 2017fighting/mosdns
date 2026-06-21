@@ -11,11 +11,11 @@ import (
 
 	"go.uber.org/zap"
 
+	dp "github.com/IrineSistiana/mosdns/v5/plugin/data_provider"
 	"github.com/IrineSistiana/mosdns/v5/plugin/data_provider/cfst_pool/internal/cidrsample"
 	"github.com/IrineSistiana/mosdns/v5/plugin/data_provider/cfst_pool/internal/downspeed"
 	"github.com/IrineSistiana/mosdns/v5/plugin/data_provider/cfst_pool/internal/scorer"
 	"github.com/IrineSistiana/mosdns/v5/plugin/data_provider/cfst_pool/internal/tcping"
-	dp "github.com/IrineSistiana/mosdns/v5/plugin/data_provider"
 )
 
 const (
@@ -27,6 +27,12 @@ const (
 type Runner struct {
 	// CIDRs is the candidate pool. Required.
 	CIDRs []string
+	// CIDRExcludes are prefixes sampled candidates must NOT fall inside.
+	// nil (default) → apply cidrsample.CloudflareWARPExcludes (WARP/gateway
+	// blocks that pass TCP but don't serve proxied customer domains).
+	// An empty slice disables exclusion; a non-empty slice replaces the
+	// default.
+	CIDRExcludes []string
 	// Port is the TCP port to probe (443 typical). Required.
 	Port uint16
 	// IPv6 enables IPv6 sampling. Defaults to IPv4 only.
@@ -93,6 +99,24 @@ func (r Runner) Run(ctx context.Context) (dp.FastIPSet, error) {
 	}
 
 	sampler := cidrsample.New(r.Seed)
+
+	// Resolve excluded prefixes: omit the field to get the built-in WARP/
+	// gateway block (passes TCP but doesn't serve proxied domains), set it
+	// to [] to disable, or set it to a custom list to replace the default.
+	rawExcludes := r.CIDRExcludes
+	if rawExcludes == nil {
+		rawExcludes = cidrsample.CloudflareWARPExcludes
+	}
+	for _, c := range rawExcludes {
+		pfx, err := netip.ParsePrefix(c)
+		if err != nil {
+			log.Warn("cfst_pool: ignoring invalid cidr_excludes entry",
+				zap.String("cidr", c), zap.Error(err))
+			continue
+		}
+		sampler.Excludes = append(sampler.Excludes, pfx.Masked())
+	}
+
 	v4CIDRs, v6CIDRs := splitCIDRsByFamily(r.CIDRs)
 
 	sampleCount := r.SampleCount
@@ -109,6 +133,7 @@ func (r Runner) Run(ctx context.Context) (dp.FastIPSet, error) {
 		zap.Int("cidrs_total", len(r.CIDRs)),
 		zap.Int("v4_cidrs", len(v4CIDRs)),
 		zap.Int("v6_cidrs", len(v6CIDRs)),
+		zap.Int("cidr_excludes", len(sampler.Excludes)),
 		zap.Bool("ipv6_enabled", r.IPv6),
 		zap.Uint16("port", r.Port),
 		zap.Int("sample_count", sampleCount),

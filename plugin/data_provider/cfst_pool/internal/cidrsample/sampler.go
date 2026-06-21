@@ -14,11 +14,25 @@ import (
 // external synchronization.
 type Sampler struct {
 	rng *rand.Rand
+	// Excludes are prefixes sampled candidates must NOT fall inside. Used to
+	// drop WARP/gateway blocks that pass a TCP probe but don't serve proxied
+	// customer domains. Empty (default) disables filtering.
+	Excludes []netip.Prefix
 }
 
 // New returns a Sampler seeded with seed. Same seed → same sequence.
 func New(seed int64) *Sampler {
 	return &Sampler{rng: rand.New(rand.NewSource(seed))}
+}
+
+// isExcluded reports whether ip falls inside any Excludes prefix.
+func (s *Sampler) isExcluded(ip netip.Addr) bool {
+	for _, ex := range s.Excludes {
+		if ex.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // SampleIPv4 picks up to count IPs from cidrs, at most one per /24. cfst uses
@@ -45,6 +59,9 @@ func (s *Sampler) SampleIPv4(cidrs []string, count int) ([]netip.Addr, error) {
 		if _, dup := used[key]; dup {
 			continue
 		}
+		if s.isExcluded(ip) {
+			continue
+		}
 		used[key] = struct{}{}
 		out = append(out, ip)
 	}
@@ -65,6 +82,15 @@ func (s *Sampler) SampleIPv6(cidrs []string, count int) ([]netip.Addr, error) {
 		ip, err := s.pickRandomIPv6(cidrs)
 		if err != nil {
 			return nil, err
+		}
+		// Re-roll excluded picks. Excludes are tiny vs the IPv6 space, so a
+		// handful of retries is always enough; if exhausted we accept the
+		// last pick rather than failing the whole sample.
+		for attempt := 0; attempt < 50 && s.isExcluded(ip); attempt++ {
+			ip, err = s.pickRandomIPv6(cidrs)
+			if err != nil {
+				return nil, err
+			}
 		}
 		out = append(out, ip)
 	}

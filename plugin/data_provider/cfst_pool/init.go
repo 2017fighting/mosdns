@@ -66,6 +66,7 @@ func Init(bp *coremain.BP, args any) (any, error) {
 	// gives no clue which stage (sample/TCP/download) dropped candidates.
 	r := runner.Runner{
 		CIDRs:           cidrs,
+		CIDRExcludes:    a.CIDRExcludes,
 		Port:            a.Port,
 		IPv6:            a.IPv6,
 		PingTimes:       a.PingTimes,
