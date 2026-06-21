@@ -1,0 +1,59 @@
+# Example mosdns config integrating cfst_pool for in-process CloudflareSpeedTest.
+#
+# Smoke test:
+#   1. Build mosdns: go build -o /tmp/mosdns-cfst
+#   2. Run: /tmp/mosdns-cfst start -c configs/cfst_pool.yaml
+#   3. Watch logs for "cfst_pool: refresh complete ipv4=N ipv6=0".
+#   4. Inspect /var/lib/mosdns/cfst_pool.json — should contain the selected IPs.
+#   5. SIGUSR1 refresh: pkill -USR1 mosdns-cfst → immediate rescan.
+#
+# This config does NOT define a full DNS server. It demonstrates the cfst_pool
+# + lpush integration; real deployments would add listeners, cache, forwarders,
+# etc.
+#
+# Config schema notes:
+# - Top-level is `plugins:` (plural), not `plugin:`
+# - Each plugin uses `tag:`, `type:`, and `args:` keys
+# - sequence uses `matches:` and `exec:` for rule definitions
+# - `matches: resp_ip $tag` requires tag to reference an ip_set plugin
+# - `exec: lpush $tag` requires tag to reference a FastIPProvider plugin
+
+log:
+  level: info
+
+plugins:
+  # The cfst_pool data_provider runs cfst's pipeline in-process and exposes
+  # the fastest Cloudflare IPs via the FastIPProvider interface.
+  - tag: cfst_pool
+    type: cfst_pool
+    args:
+      download_url: https://cfst.raenzo.com/test
+      port: 443
+      sample_count: 100      # cfst -n
+      download_seconds: 5    # cfst -dn
+      download_timeout: 5s   # cfst -dt
+      ping_times: 4
+      routines: 200
+      top_n: 10
+      refresh_interval: 1h
+      cache_file: /var/lib/mosdns/cfst_pool.json
+      ipv6: false
+      seed: 42
+
+  # Cloudflare CIDR matcher (existing mosdns plugin). Used to identify whether
+  # a response IP belongs to Cloudflare so we know to apply lpush.
+  # NOTE: You need to create /etc/mosdns/cloudflare.txt with Cloudflare CIDR ranges.
+  # For testing, you can use the vendor file we created: plugin/data_provider/cfst_pool/cloudflare.txt
+  - tag: cloudflare_cidr
+    type: ip_set
+    args:
+      files:
+        - /etc/mosdns/cloudflare.txt
+
+  # The sequence that ties it together: when a response IP matches Cloudflare's
+  # CIDR, prepend the fast IPs from cfst_pool.
+  - tag: main_sequence
+    type: sequence
+    args:
+      - matches: 'resp_ip $cloudflare_cidr'
+        exec: 'lpush $cfst_pool'
