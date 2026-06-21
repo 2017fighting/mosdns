@@ -8,6 +8,10 @@ import (
 
 // Sampler picks candidate IPs from a list of CIDRs. A fixed seed produces a
 // deterministic sequence, which keeps tests reproducible.
+//
+// Not safe for concurrent use. The internal *rand.Rand is not goroutine-safe;
+// callers must invoke SampleIPv4/SampleIPv6 from a single goroutine or provide
+// external synchronization.
 type Sampler struct {
 	rng *rand.Rand
 }
