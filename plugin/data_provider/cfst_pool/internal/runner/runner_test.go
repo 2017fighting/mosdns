@@ -19,31 +19,32 @@ func TestRun_HappyPath_ProducesFastIPSet(t *testing.T) {
 	port := uint16(srv.Listener.Addr().(*net.TCPAddr).Port)
 
 	r := Runner{
-		CIDRs:           []string{"127.0.0.0/24"},
+		CIDRs:           []string{"127.0.0.1/32"},
 		Port:            port,
-		PingTimes:       2,
-		Routines:        4,
+		PingTimes:       1,
+		Routines:        1,
 		TCPTimeout:      500 * time.Millisecond,
 		HTTPS:           false,
 		DownloadURL:     srv.URL,
 		DownloadTimeout: 1 * time.Second,
-		TopN:            2,
-		Seed:            0,
-		SampleCount:     100,
+		TopN:            1,
+		Seed:            42,
+		SampleCount:     1,
 	}
 
 	set, err := r.Run()
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	// 127.0.0.1:<port> should succeed; only .1 of 127.0.0.0/30 has our listener.
+	// 127.0.0.1/32 guarantees the sampler picks 127.0.0.1
 	if len(set.IPv4) == 0 {
-		t.Skip("no candidates succeeded in this environment; sampler RNG or timing varied")
+		t.Fatalf("expected at least 1 IPv4 from 127.0.0.1/32, got 0")
 	}
-	for _, ip := range set.IPv4 {
-		if !ip.IsLoopback() {
-			t.Errorf("expected loopback IP, got %v", ip)
-		}
+	if len(set.IPv4) != 1 {
+		t.Errorf("expected exactly 1 IPv4 (TopN=1), got %d: %v", len(set.IPv4), set.IPv4)
+	}
+	if !set.IPv4[0].IsLoopback() {
+		t.Errorf("expected loopback, got %v", set.IPv4[0])
 	}
 }
 
