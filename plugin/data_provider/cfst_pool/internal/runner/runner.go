@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"slices"
 	"sort"
 	"time"
 
@@ -256,9 +257,11 @@ func (r Runner) Run(ctx context.Context) (dp.FastIPSet, error) {
 func logTCPStats(log *zap.Logger, family string, sampled []netip.Addr, reach []tcping.Result) {
 	reachable := 0
 	var firstErr error
+	rtts := make([]time.Duration, 0, len(reach))
 	for _, res := range reach {
 		if res.Err == nil && res.AvgRTT > 0 {
 			reachable++
+			rtts = append(rtts, res.AvgRTT)
 			continue
 		}
 		if firstErr == nil && res.Err != nil {
@@ -271,6 +274,21 @@ func logTCPStats(log *zap.Logger, family string, sampled []netip.Addr, reach []t
 		zap.Int("reachable", reachable),
 		zap.NamedError("first_err", firstErr),
 	)
+	// RTT distribution at Debug — ONE line, not one-per-IP, so it stays
+	// readable when thousands of IPs are reachable. Min/p50/max is enough
+	// to tell whether the reachable set is uniformly fast or split between
+	// a fast core and a sluggish tail (the tail then loses the download
+	// stage). Per-IP RTT was deliberately dropped: it flooded Debug.
+	if len(rtts) > 0 {
+		slices.Sort(rtts)
+		log.Debug("cfst_pool: tcp probe rtt stats",
+			zap.String("family", family),
+			zap.Int("reachable", len(rtts)),
+			zap.Duration("min", rtts[0]),
+			zap.Duration("p50", rtts[len(rtts)/2]),
+			zap.Duration("max", rtts[len(rtts)-1]),
+		)
+	}
 }
 
 func splitCIDRsByFamily(cidrs []string) (v4, v6 []string) {
@@ -300,10 +318,11 @@ func splitCIDRsByFamily(cidrs []string) (v4, v6 []string) {
 // The ctx is checked between each sequential probe so a canceled scan
 // (e.g. plugin shutdown) does not wait behind the remaining N-1 downloads.
 //
-// log and family are used to emit per-stage outcome stats. Per-IP download
-// failures are logged at Debug; the aggregate (success/total + sample err)
-// is logged at Info so the operator can see at a glance whether the
-// download stage is what emptied the candidate pool.
+// log and family are used to emit per-stage outcome stats. Each per-IP
+// download result (success throughput and failure) is logged at Debug; the
+// aggregate (success/total + sample err) is logged at Info so the operator
+// can see at a glance whether the download stage is what emptied the
+// candidate pool.
 func probeDownloads(ctx context.Context, dl downspeed.Probe, reach []tcping.Result, downloadURL string, maxProbes int, family string, log *zap.Logger) []scorer.Candidate {
 	filtered := make([]tcping.Result, 0, len(reach))
 	for _, res := range reach {
@@ -358,6 +377,12 @@ func probeDownloads(ctx context.Context, dl downspeed.Probe, reach []tcping.Resu
 			AvgRTT:      res.AvgRTT,
 			BytesPerSec: dlResult.BytesPerSec,
 		})
+		log.Debug("cfst_pool: download probe result",
+			zap.String("family", family),
+			zap.Stringer("addr", res.Addr),
+			zap.Float64("bytes_per_sec", dlResult.BytesPerSec),
+			zap.Duration("avg_rtt", res.AvgRTT),
+		)
 	}
 	log.Info("cfst_pool: download probe complete",
 		zap.String("family", family),
