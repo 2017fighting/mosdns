@@ -83,6 +83,14 @@ func (p Probe) Probe(ctx context.Context, dialIP string, testURL string, addr ne
 			}
 			return dialer.DialContext(ctx, network, net.JoinHostPort(dialIP, fmt.Sprintf("%d", port)))
 		},
+		// DisableKeepAlives makes the Transport close each connection when the
+		// response body is closed instead of parking it in an idle pool. Every
+		// probe dials a DISTINCT IP (dialIP), so the idle pool could never reuse
+		// a connection anyway — keep-alive here only leaked idle TLS connections
+		// that lingered until GC, surfacing as "too many open connections".
+		// resp.Body.Close() is deferred above, so the connection releases as
+		// soon as Probe returns. See docs/superpowers/specs/2026-06-21-cfst-pool-connection-cleanup-design.md.
+		DisableKeepAlives: true,
 	}
 
 	// Timeout enforcement: http.Client.Timeout bounds the full request (dial +

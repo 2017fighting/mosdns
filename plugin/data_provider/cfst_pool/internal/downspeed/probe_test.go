@@ -3,10 +3,12 @@ package downspeed
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -138,4 +140,97 @@ func TestProbe_FWMarkExercisesControl(t *testing.T) {
 		}
 		t.Fatalf("unexpected error: %v", r.Err)
 	}
+}
+
+// connCountListener wraps a net.Listener, counting open server-side connections
+// so a test can assert the client closed its connection rather than parking it
+// in an idle keep-alive pool.
+type connCountListener struct {
+	net.Listener
+	mu   sync.Mutex
+	live int
+}
+
+func (l *connCountListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return c, err
+	}
+	l.mu.Lock()
+	l.live++
+	l.mu.Unlock()
+	return &countedConn{Conn: c, parent: l}, nil
+}
+
+func (l *connCountListener) liveCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.live
+}
+
+func (l *connCountListener) decrement() {
+	l.mu.Lock()
+	l.live--
+	l.mu.Unlock()
+}
+
+type countedConn struct {
+	net.Conn
+	parent *connCountListener
+}
+
+func (c *countedConn) Close() error {
+	err := c.Conn.Close()
+	c.parent.decrement()
+	return err
+}
+
+// TestProbe_ClosesConnectionAfterProbe asserts the probe does NOT leak an
+// idle keep-alive connection: after Probe returns, the server-side connection
+// count must drop back to 0. Before DisableKeepAlives this fails because the
+// per-call Transport parks the connection in an idle pool that lingers until GC.
+func TestProbe_ClosesConnectionAfterProbe(t *testing.T) {
+	payload := strings.Repeat("x", 1<<20)
+
+	inner, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	listener := &connCountListener{Listener: inner}
+
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(payload))
+	}))
+	// Replace httptest's default listener with our counting one, closing the
+	// unused default to avoid an FD leak. Start() builds srv.URL from
+	// srv.Listener.Addr(), so srv.URL reflects the counting listener's port.
+	orig := srv.Listener
+	srv.Listener = listener
+	orig.Close()
+	srv.Start()
+	defer srv.Close()
+
+	p := Probe{
+		Timeout:    2 * time.Second,
+		HTTPS:      false,
+		Port:       0,
+		DownloadMB: 1,
+	}
+	dialIP := "127.0.0.1"
+	r := p.Probe(context.Background(), dialIP, srv.URL, netip.MustParseAddr("127.0.0.1"))
+	if r.Err != nil {
+		t.Fatalf("unexpected error: %v", r.Err)
+	}
+
+	// The client-side close propagates to the server side asynchronously; poll
+	// briefly rather than asserting synchronously to avoid flakiness.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if listener.liveCount() == 0 {
+			return // pass
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("expected 0 live connections after probe, got %d (idle connection leaked)",
+		listener.liveCount())
 }
