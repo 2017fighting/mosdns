@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/IrineSistiana/mosdns/v5/coremain"
@@ -154,15 +153,22 @@ func (p *Plugin) refreshLoop(bp *coremain.BP) {
 }
 
 func (p *Plugin) signalHandler(bp *coremain.BP) {
+	sigs := refreshSignals()
+	if len(sigs) == 0 {
+		// No refresh signal exists on this platform (e.g. Windows). The
+		// background ticker still refreshes cfst_pool on schedule, so this
+		// goroutine has nothing to listen for.
+		return
+	}
 	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGUSR1)
+	signal.Notify(ch, sigs...)
 	defer signal.Stop(ch)
 	for {
 		select {
 		case <-p.stopCh:
 			return
 		case <-ch:
-			bp.L().Info("cfst_pool: SIGUSR1 received, refreshing")
+			bp.L().Info("cfst_pool: refresh signal received, refreshing")
 			// Operator-initiated rescans use background ctx; if shutdown
 			// arrives mid-rescan, Close() does not block on this goroutine
 			// because signalHandler does not own doneCh. The refresh simply
