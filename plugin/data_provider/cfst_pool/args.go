@@ -46,7 +46,12 @@ type Args struct {
 	Port uint16 `yaml:"port"`
 	// PingTimes is TCP probes per IP. Default 4.
 	PingTimes int `yaml:"ping_times"`
-	// Routines bounds concurrency. Default 200.
+	// Routines is the hard concurrency cap for the TCP probe stage: a semaphore
+	// bounds the number of simultaneous dial goroutines (cfst default 200). Each
+	// in-flight slot holds at most one socket — probeOne dials PingTimes times
+	// sequentially and closes each connection immediately on success, so this
+	// is also the peak number of open TCP sockets during the scan. Lower it if
+	// your runtime's open-file ulimit is tight. Default 200.
 	Routines int `yaml:"routines"`
 	// TopN is how many IPs per family to retain. Default 10.
 	TopN int `yaml:"top_n"`
