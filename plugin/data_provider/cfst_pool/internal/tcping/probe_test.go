@@ -1,6 +1,7 @@
 package tcping
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/netip"
@@ -34,7 +35,7 @@ func TestProbe_ReachableHostRTT(t *testing.T) {
 		Timeout:   500 * time.Millisecond,
 		Port:      port,
 	}
-	results := p.Probe([]netip.Addr{netip.MustParseAddr("127.0.0.1")})
+	results := p.Probe(context.Background(), []netip.Addr{netip.MustParseAddr("127.0.0.1")})
 
 	if len(results) != 1 {
 		t.Fatalf("want 1 result, got %d", len(results))
@@ -59,7 +60,7 @@ func TestProbe_UnreachableHostFails(t *testing.T) {
 		Timeout:   200 * time.Millisecond,
 		Port:      1,
 	}
-	results := p.Probe([]netip.Addr{netip.MustParseAddr("127.0.0.1")})
+	results := p.Probe(context.Background(), []netip.Addr{netip.MustParseAddr("127.0.0.1")})
 	if len(results) != 1 {
 		t.Fatalf("want 1 result, got %d", len(results))
 	}
@@ -101,7 +102,7 @@ func TestProbe_ConcurrencyBounded(t *testing.T) {
 		Timeout:   500 * time.Millisecond,
 		Port:      uint16(lns[0].Addr().(*net.TCPAddr).Port),
 	}
-	results := p.Probe(addrs)
+	results := p.Probe(context.Background(), addrs)
 	if len(results) != 10 {
 		t.Fatalf("want 10 results, got %d", len(results))
 	}
@@ -141,7 +142,7 @@ func TestProbe_FWMarkExercisesControl(t *testing.T) {
 		Port:      uint16(ln.Addr().(*net.TCPAddr).Port),
 		FWMark:    0x1,
 	}
-	results := p.Probe([]netip.Addr{netip.MustParseAddr("127.0.0.1")})
+	results := p.Probe(context.Background(), []netip.Addr{netip.MustParseAddr("127.0.0.1")})
 	if len(results) != 1 {
 		t.Fatalf("want 1 result, got %d", len(results))
 	}

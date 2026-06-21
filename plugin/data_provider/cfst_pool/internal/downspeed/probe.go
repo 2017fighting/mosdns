@@ -41,7 +41,12 @@ type Probe struct {
 
 // Probe measures throughput for one IP against testURL (whose Host is rewritten
 // to the dial IP).
-func (p Probe) Probe(dialIP string, testURL string, addr netip.Addr) Result {
+//
+// The parent ctx bounds the probe alongside the probe's own Timeout: whichever
+// fires first (parent cancel or Timeout deadline) aborts the in-flight HTTP
+// request via context cancellation. This lets the runner abort a long download
+// promptly when the plugin is shutting down.
+func (p Probe) Probe(ctx context.Context, dialIP string, testURL string, addr netip.Addr) Result {
 	if p.Timeout <= 0 {
 		p.Timeout = 10 * time.Second
 	}
@@ -90,10 +95,13 @@ func (p Probe) Probe(dialIP string, testURL string, addr netip.Addr) Result {
 		Timeout:   p.Timeout,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), p.Timeout)
+	// Derive the request ctx from the caller-supplied ctx so a parent
+	// cancellation (e.g. plugin shutdown) aborts the in-flight download
+	// promptly instead of waiting for Timeout to elapse.
+	reqCtx, cancel := context.WithTimeout(ctx, p.Timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, testURL, nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, testURL, nil)
 	if err != nil {
 		r.Err = fmt.Errorf("build request: %w", err)
 		return r
@@ -122,6 +130,7 @@ func (p Probe) Probe(dialIP string, testURL string, addr netip.Addr) Result {
 
 	var totalRead int64
 	buf := make([]byte, 32*1024)
+readLoop:
 	for {
 		select {
 		case <-ticker.C:
@@ -131,6 +140,15 @@ func (p Probe) Probe(dialIP string, testURL string, addr netip.Addr) Result {
 				e.Add(instant)
 				r.BytesPerSec = e.Value() / (p.Timeout.Seconds() / 120)
 			}
+		case <-reqCtx.Done():
+			// Parent cancellation or Timeout deadline fired. Bail out
+			// with whatever EWMA we have so far; the runner treats this
+			// as a failed probe and skips the IP.
+			if reqCtx.Err() != nil && totalRead == 0 {
+				r.Err = fmt.Errorf("read body: %w", reqCtx.Err())
+				return r
+			}
+			break readLoop
 		default:
 		}
 		n, readErr := resp.Body.Read(buf)

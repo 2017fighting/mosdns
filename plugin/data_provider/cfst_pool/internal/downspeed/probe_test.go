@@ -1,6 +1,7 @@
 package downspeed
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -27,7 +28,7 @@ func TestProbe_SuccessReturnsBytesPerSecond(t *testing.T) {
 	}
 	// Extract port from srv.URL for dialing
 	dialIP := "127.0.0.1"
-	r := p.Probe(dialIP, srv.URL, netip.MustParseAddr("127.0.0.1"))
+	r := p.Probe(context.Background(), dialIP, srv.URL, netip.MustParseAddr("127.0.0.1"))
 	if r.Err != nil {
 		t.Fatalf("unexpected error: %v", r.Err)
 	}
@@ -43,7 +44,7 @@ func TestProbe_UnreachableFails(t *testing.T) {
 		Port:       1,
 		DownloadMB: 1,
 	}
-	r := p.Probe("127.0.0.1", "https://127.0.0.1:1/x", netip.MustParseAddr("127.0.0.1"))
+	r := p.Probe(context.Background(), "127.0.0.1", "https://127.0.0.1:1/x", netip.MustParseAddr("127.0.0.1"))
 	if r.Err == nil {
 		t.Errorf("expected error for unreachable host, got nil")
 	}
@@ -65,7 +66,7 @@ func TestProbe_AbortsOnTimeout(t *testing.T) {
 		Port:       0,
 		DownloadMB: 1,
 	}
-	r := p.Probe("127.0.0.1", srv.URL, netip.MustParseAddr("127.0.0.1"))
+	r := p.Probe(context.Background(), "127.0.0.1", srv.URL, netip.MustParseAddr("127.0.0.1"))
 	if r.Err == nil {
 		t.Errorf("expected timeout error, got nil (BytesPerSec=%v)", r.BytesPerSec)
 	}
@@ -90,7 +91,7 @@ func TestProbe_FWMarkExercisesControl(t *testing.T) {
 		DownloadMB: 1,
 		FWMark:     0x1,
 	}
-	r := p.Probe("127.0.0.1", srv.URL, netip.MustParseAddr("127.0.0.1"))
+	r := p.Probe(context.Background(), "127.0.0.1", srv.URL, netip.MustParseAddr("127.0.0.1"))
 	if r.Err != nil {
 		if errors.Is(r.Err, syscall.EPERM) || strings.Contains(r.Err.Error(), "operation not permitted") {
 			t.Skipf("SO_MARK failed (no CAP_NET_ADMIN); wiring is correct: %v", r.Err)

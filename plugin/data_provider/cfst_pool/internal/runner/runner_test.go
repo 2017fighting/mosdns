@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -32,7 +33,7 @@ func TestRun_HappyPath_ProducesFastIPSet(t *testing.T) {
 		SampleCount:     1,
 	}
 
-	set, err := r.Run()
+	set, err := r.Run(context.Background())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -52,7 +53,7 @@ func TestRun_NoCIDRsErrors(t *testing.T) {
 	r := Runner{
 		DownloadURL: "http://example.com",
 	}
-	_, err := r.Run()
+	_, err := r.Run(context.Background())
 	if err == nil {
 		t.Fatal("expected error for no CIDRs")
 	}

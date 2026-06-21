@@ -3,6 +3,7 @@
 package runner
 
 import (
+	"context"
 	"fmt"
 	"net/netip"
 	"sort"
@@ -55,7 +56,12 @@ type Runner struct {
 }
 
 // Run executes the pipeline and returns the selected IPs.
-func (r Runner) Run() (dp.FastIPSet, error) {
+//
+// The ctx argument is propagated into both probes (TCP ping and HTTP
+// download) so the caller can abort an in-flight scan early — primarily
+// used by the plugin's shutdown path so mosdns's Close is not held hostage
+// to a multi-minute scan running to completion.
+func (r Runner) Run(ctx context.Context) (dp.FastIPSet, error) {
 	if len(r.CIDRs) == 0 {
 		return dp.FastIPSet{}, fmt.Errorf("no CIDRs configured")
 	}
@@ -86,6 +92,10 @@ func (r Runner) Run() (dp.FastIPSet, error) {
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return dp.FastIPSet{}, fmt.Errorf("runner: %w", err)
+	}
+
 	tcpTimeout := r.TCPTimeout
 	if tcpTimeout <= 0 {
 		tcpTimeout = defaultTCPTimeout
@@ -97,8 +107,12 @@ func (r Runner) Run() (dp.FastIPSet, error) {
 		Port:      r.Port,
 		FWMark:    r.FWMark,
 	}
-	v4Reach := tcp.Probe(v4Addrs)
-	v6Reach := tcp.Probe(v6Addrs)
+	v4Reach := tcp.Probe(ctx, v4Addrs)
+	v6Reach := tcp.Probe(ctx, v6Addrs)
+
+	if err := ctx.Err(); err != nil {
+		return dp.FastIPSet{}, fmt.Errorf("runner: %w", err)
+	}
 
 	dlTimeout := r.DownloadTimeout
 	if dlTimeout <= 0 {
@@ -119,10 +133,10 @@ func (r Runner) Run() (dp.FastIPSet, error) {
 	// Probe only topN candidates by TCP latency, matching cfst's TestCount.
 	// Sequential probing (inside probeDownloads) avoids tripping Cloudflare's
 	// edge WAF, which 429s parallel requests from a single source.
-	v4Candidates := probeDownloads(dl, v4Reach, r.DownloadURL, topN)
+	v4Candidates := probeDownloads(ctx, dl, v4Reach, r.DownloadURL, topN)
 	var v6Candidates []scorer.Candidate
 	if r.IPv6 {
-		v6Candidates = probeDownloads(dl, v6Reach, r.DownloadURL, topN)
+		v6Candidates = probeDownloads(ctx, dl, v6Reach, r.DownloadURL, topN)
 	}
 
 	set := dp.FastIPSet{}
@@ -160,7 +174,10 @@ func splitCIDRsByFamily(cidrs []string) (v4, v6 []string) {
 // cfst itself probes one IP at a time and gets 200 OK; we replicate that.
 // Probing N IPs at T seconds each costs N*T wall-clock — acceptable for a
 // background refresh that runs hourly.
-func probeDownloads(dl downspeed.Probe, reach []tcping.Result, downloadURL string, maxProbes int) []scorer.Candidate {
+//
+// The ctx is checked between each sequential probe so a canceled scan
+// (e.g. plugin shutdown) does not wait behind the remaining N-1 downloads.
+func probeDownloads(ctx context.Context, dl downspeed.Probe, reach []tcping.Result, downloadURL string, maxProbes int) []scorer.Candidate {
 	filtered := make([]tcping.Result, 0, len(reach))
 	for _, res := range reach {
 		if res.Err == nil && res.AvgRTT > 0 {
@@ -176,7 +193,10 @@ func probeDownloads(dl downspeed.Probe, reach []tcping.Result, downloadURL strin
 
 	candidates := make([]scorer.Candidate, 0, len(filtered))
 	for _, res := range filtered {
-		dlResult := dl.Probe(res.Addr.String(), downloadURL, res.Addr)
+		if err := ctx.Err(); err != nil {
+			break
+		}
+		dlResult := dl.Probe(ctx, res.Addr.String(), downloadURL, res.Addr)
 		if dlResult.Err != nil || dlResult.BytesPerSec <= 0 {
 			continue
 		}

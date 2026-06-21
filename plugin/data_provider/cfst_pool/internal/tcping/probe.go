@@ -2,6 +2,7 @@
 package tcping
 
 import (
+	"context"
 	"net"
 	"net/netip"
 	"sync"
@@ -36,9 +37,14 @@ type Probe struct {
 // Probe returns one Result per input addr, in input order. Unreachable IPs
 // have a non-nil Err and zero AvgRTT.
 //
+// The ctx argument bounds the whole batch: when ctx is canceled, no new
+// goroutines are launched, the semaphore acquire aborts, and in-flight
+// dials abort via DialContext. Already-started goroutines return with a
+// canceled-ctx error recorded on their Result.
+//
 // Safe for concurrent use by multiple goroutines only if each goroutine has
 // its own Probe value; the method itself does not mutate Probe state.
-func (p Probe) Probe(addrs []netip.Addr) []Result {
+func (p Probe) Probe(ctx context.Context, addrs []netip.Addr) []Result {
 	if len(addrs) == 0 {
 		return nil
 	}
@@ -57,20 +63,35 @@ func (p Probe) Probe(addrs []netip.Addr) []Result {
 	var wg sync.WaitGroup
 
 	for i, addr := range addrs {
+		// Stop launching once ctx is canceled; remaining slots stay as
+		// zero-value Results (Err=nil, AvgRTT=0), which the runner's
+		// reachability filter excludes via AvgRTT > 0.
+		if ctx.Err() != nil {
+			break
+		}
+
 		wg.Add(1)
-		sem <- struct{}{}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			// Couldn't acquire a slot before cancellation; record the
+			// ctx error so the caller sees why this addr was skipped.
+			results[i] = Result{Addr: addr, Err: ctx.Err()}
+			wg.Done()
+			continue
+		}
 		go func(i int, addr netip.Addr) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			results[i] = p.probeOne(addr)
+			results[i] = p.probeOne(ctx, addr)
 		}(i, addr)
 	}
 	wg.Wait()
 	return results
 }
 
-func (p Probe) probeOne(addr netip.Addr) Result {
+func (p Probe) probeOne(ctx context.Context, addr netip.Addr) Result {
 	var sumRTT time.Duration
 	var lastErr error
 	successes := 0
@@ -79,12 +100,18 @@ func (p Probe) probeOne(addr netip.Addr) Result {
 	// applies SO_MARK before connect(). FWMark=0 → Control returns nil →
 	// net.Dialer skips the callback, zero overhead on the unmarked path.
 	dialer := &net.Dialer{
-		Timeout:  p.Timeout,
-		Control:  sockmark.Control(p.FWMark),
+		Timeout: p.Timeout,
+		Control: sockmark.Control(p.FWMark),
 	}
 	for i := 0; i < p.PingTimes; i++ {
+		if err := ctx.Err(); err != nil {
+			if successes == 0 {
+				return Result{Addr: addr, Err: err}
+			}
+			break
+		}
 		start := time.Now()
-		conn, err := dialer.Dial("tcp", ap.String())
+		conn, err := dialer.DialContext(ctx, "tcp", ap.String())
 		elapsed := time.Since(start)
 		if err != nil {
 			lastErr = err

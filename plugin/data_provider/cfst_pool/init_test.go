@@ -2,7 +2,10 @@ package cfst_pool
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"testing"
 	"time"
 
@@ -188,5 +191,74 @@ func TestGetFastIPsConcurrency(t *testing.T) {
 		case <-timeout:
 			t.Fatal("Timeout waiting for goroutines")
 		}
+	}
+}
+
+// TestCloseAbortsInFlightScan reproduces the slow-shutdown bug: when mosdns
+// closes the plugin while a refresh scan is mid-flight (inside the HTTP
+// download probe), Close() must not wait for the scan's full DownloadTimeout
+// to elapse. Before ctx propagation, it blocked for ~10s here.
+func TestCloseAbortsInFlightScan(t *testing.T) {
+	// Server that stalls until the test tears it down. The scan will reach
+	// this handler after the (instant) loopback TCP probe and park here.
+	stallCh := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-stallCh:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(stallCh)
+
+	// Parse the httptest port so we can point cfst_pool's Port arg at the
+	// real listener (Port=0 in args defaults to 443, which is not where the
+	// test server lives).
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse srv.URL: %v", err)
+	}
+	var srvPort uint16
+	if _, err := fmt.Sscanf(u.Port(), "%d", &srvPort); err != nil {
+		t.Fatalf("parse srv port: %v", err)
+	}
+
+	args := Args{
+		DownloadURL:     srv.URL,
+		SampleCount:     1,
+		DownloadSeconds: 10,
+		DownloadTimeout: 10,
+		Port:            srvPort,
+		PingTimes:       1,
+		TopN:            1,
+		CIDRs:           []string{"127.0.0.1/32"},
+		RefreshInterval: 3600,
+	}
+	args.applyDefaults()
+
+	plugins := make(map[string]any)
+	m := coremain.NewTestMosdnsWithPlugins(plugins)
+	bp := coremain.NewBP("test_close_abort", m)
+
+	pluginAny, err := Init(bp, &args)
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	plugin := pluginAny.(*Plugin)
+
+	// Give the cold-start scan time to reach the download probe. The TCP
+	// ping to 127.0.0.1 completes in <1ms; 300ms is ample headroom.
+	time.Sleep(300 * time.Millisecond)
+
+	// Close must abort the in-flight scan via context cancellation and
+	// return promptly. Before the fix this blocked for the full 10s
+	// DownloadTimeout.
+	start := time.Now()
+	if err := plugin.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	elapsed := time.Since(start)
+	if elapsed > time.Second {
+		t.Errorf("Close took %v; expected <1s once ctx cancel propagates", elapsed)
 	}
 }

@@ -1,6 +1,7 @@
 package cfst_pool
 
 import (
+	"context"
 	"fmt"
 	"net/netip"
 	"os"
@@ -113,10 +114,26 @@ func Init(bp *coremain.BP, args any) (any, error) {
 func (p *Plugin) refreshLoop(bp *coremain.BP) {
 	defer close(p.doneCh)
 
+	// ctx lives for the lifetime of the loop. Canceling it aborts any
+	// in-flight scan promptly (TCP dials and HTTP downloads honor ctx),
+	// so Close() does not have to wait for a multi-minute scan to finish.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Fan stopCh out to ctx cancellation. The companion goroutine exits
+	// as soon as either side fires.
+	go func() {
+		select {
+		case <-p.stopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
 	// Immediate cold-start scan. Runs in the background so mosdns can bind
 	// UDP/TCP ports without waiting for it. Failure is logged and retried
 	// on the next tick; the last good set (or cache) is preserved.
-	p.refresh(bp)
+	p.refresh(ctx, bp)
 
 	ticker := time.NewTicker(time.Duration(p.args.RefreshInterval) * time.Second)
 	defer ticker.Stop()
@@ -125,7 +142,7 @@ func (p *Plugin) refreshLoop(bp *coremain.BP) {
 		case <-p.stopCh:
 			return
 		case <-ticker.C:
-			p.refresh(bp)
+			p.refresh(ctx, bp)
 		}
 	}
 }
@@ -140,15 +157,25 @@ func (p *Plugin) signalHandler(bp *coremain.BP) {
 			return
 		case <-ch:
 			bp.L().Info("cfst_pool: SIGUSR1 received, refreshing")
-			p.refresh(bp)
+			// Operator-initiated rescans use background ctx; if shutdown
+			// arrives mid-rescan, Close() does not block on this goroutine
+			// because signalHandler does not own doneCh. The refresh simply
+			// runs to completion and its result lands in p.current.
+			p.refresh(context.Background(), bp)
 		}
 	}
 }
 
-func (p *Plugin) refresh(bp *coremain.BP) {
-	set, err := p.runner.Run()
+func (p *Plugin) refresh(ctx context.Context, bp *coremain.BP) {
+	set, err := p.runner.Run(ctx)
 	if err != nil {
-		bp.L().Warn("cfst_pool: refresh failed, keeping last set", zap.Error(err))
+		if ctx.Err() != nil {
+			// Cancellation (typically shutdown) — don't warn at default
+			// level; this is expected during Close.
+			bp.L().Debug("cfst_pool: refresh aborted", zap.Error(err))
+		} else {
+			bp.L().Warn("cfst_pool: refresh failed, keeping last set", zap.Error(err))
+		}
 		return
 	}
 	// Non-zero speed contract: if entire scan returns empty, keep last set.
