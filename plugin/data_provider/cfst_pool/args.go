@@ -33,7 +33,13 @@ type Args struct {
 	// DownloadTimeout bounds a single download attempt, in seconds. cfst -dt. Default = DownloadSeconds.
 	DownloadTimeout int `yaml:"download_timeout"`
 	// SampleCount is the number of IPs to draw per family. cfst -n. Default 100.
+	// Ignored for IPv4 when sample_mode is "cfst" (full /24 coverage).
 	SampleCount int `yaml:"sample_count"`
+	// SampleMode selects the IPv4 sampling strategy. "" or "random" (default)
+	// draws SampleCount IPs at most one per /24; "cfst" mirrors
+	// CloudflareSpeedTest's default walk over every /24 for full coverage
+	// (~5900 candidates on the built-in list). IPv6 always samples randomly.
+	SampleMode string `yaml:"sample_mode"`
 	// DownloadURL is the test file URL. Required.
 	DownloadURL string `yaml:"download_url"`
 	// Port is the TCP port to probe. Default 443.
@@ -44,7 +50,10 @@ type Args struct {
 	Routines int `yaml:"routines"`
 	// TopN is how many IPs per family to retain. Default 10.
 	TopN int `yaml:"top_n"`
-	// RefreshInterval is the background rescan period, in seconds. Default 3600.
+	// RefreshInterval is the background rescan period, in seconds. Default
+	// 21600 (6h): cfst-mode scans test ~5900 IPs and are heavier than the
+	// random subset, so the default is sized for that. Set lower for random
+	// mode if you want fresher results.
 	RefreshInterval int `yaml:"refresh_interval"`
 	// CacheFile is the on-disk persistence path. Default empty (no persistence).
 	CacheFile string `yaml:"cache_file"`
@@ -94,8 +103,11 @@ func (a *Args) applyDefaults() {
 	if a.TopN <= 0 {
 		a.TopN = 10
 	}
+	if a.SampleMode == "" {
+		a.SampleMode = "random"
+	}
 	if a.RefreshInterval <= 0 {
-		a.RefreshInterval = 3600
+		a.RefreshInterval = 21600 // 6h
 	}
 	if a.Seed == 0 {
 		a.Seed = 1

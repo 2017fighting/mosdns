@@ -91,3 +91,46 @@ func TestRun_NoCIDRsErrors(t *testing.T) {
 		t.Fatal("expected error for no CIDRs")
 	}
 }
+
+// TestRun_SampleModeCFST_RoutesToEnumerate verifies that SampleMode="cfst"
+// routes IPv4 sampling through cidrsample.EnumerateIPv4 (full /24 walk)
+// instead of the random subset. With 127.0.0.1/32 — which EnumerateIPv4
+// returns verbatim via its /32 special-case — the loopback server is still
+// reached, so the pipeline produces the same loopback result as the
+// default-mode happy path. (EnumerateIPv4's multi-/24 coverage is pinned
+// directly in cidrsample/enumerate_test.go; this test only confirms routing.)
+func TestRun_SampleModeCFST_RoutesToEnumerate(t *testing.T) {
+	payload := strings.Repeat("x", 256*1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer srv.Close()
+
+	port := uint16(srv.Listener.Addr().(*net.TCPAddr).Port)
+
+	r := Runner{
+		CIDRs:           []string{"127.0.0.1/32"},
+		Port:            port,
+		PingTimes:       1,
+		Routines:        1,
+		TCPTimeout:      500 * time.Millisecond,
+		HTTPS:           false,
+		DownloadURL:     srv.URL,
+		DownloadTimeout: 1 * time.Second,
+		TopN:            1,
+		Seed:            42,
+		SampleCount:     1,
+		SampleMode:      SampleModeCFST,
+	}
+
+	set, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(set.IPv4) != 1 {
+		t.Fatalf("expected exactly 1 IPv4 (TopN=1), got %d: %v", len(set.IPv4), set.IPv4)
+	}
+	if !set.IPv4[0].IsLoopback() {
+		t.Errorf("expected loopback, got %v", set.IPv4[0])
+	}
+}

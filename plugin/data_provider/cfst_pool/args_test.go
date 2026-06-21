@@ -63,6 +63,12 @@ download_url: https://cfst.raenzo.com/test
 	if a.Port == 0 {
 		t.Errorf("Port should default, got 0")
 	}
+	if a.SampleMode != "random" {
+		t.Errorf("SampleMode: want \"random\", got %q", a.SampleMode)
+	}
+	if a.RefreshInterval != 21600 {
+		t.Errorf("RefreshInterval: want 21600 (6h default), got %d", a.RefreshInterval)
+	}
 }
 
 func TestArgs_RequiredFieldsMissing(t *testing.T) {

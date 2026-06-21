@@ -97,6 +97,85 @@ func (s *Sampler) SampleIPv6(cidrs []string, count int) ([]netip.Addr, error) {
 	return out, nil
 }
 
+// EnumerateIPv4 mirrors CloudflareSpeedTest's default (TestAll=false) IPv4
+// sampling: it walks EVERY /24 contained in cidrs and picks one random host
+// address per /24, giving full /24 coverage. For the built-in Cloudflare list
+// this yields ~5900 candidates vs. SampleIPv4's fixed subset. A /32 collapses
+// to its single host (returned verbatim, matching cfst). Excludes drop whole
+// candidate picks; a fully-excluded input errors rather than returning empty.
+//
+// Use this when the caller wants cfst's "same as upstream" coverage. The
+// runner selects it via SampleMode == "cfst"; SampleIPv4 remains the default.
+func (s *Sampler) EnumerateIPv4(cidrs []string) ([]netip.Addr, error) {
+	if len(cidrs) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{})
+	out := make([]netip.Addr, 0)
+	for _, c := range cidrs {
+		pfx, err := netip.ParsePrefix(c)
+		if err != nil {
+			return nil, fmt.Errorf("parse CIDR %q: %w", c, err)
+		}
+		pfx = pfx.Masked()
+
+		// /32 is a degenerate single host: return it verbatim, no
+		// randomization (cfst's chooseIPv4 special-cases /32 the same way).
+		if pfx.Bits() == 32 {
+			ip := pfx.Addr()
+			if s.isExcluded(ip) {
+				continue
+			}
+			key := ip.String()
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, ip)
+			continue
+		}
+
+		forEachIPv4Slash24(pfx, func(sp netip.Prefix) {
+			key := sp.String()
+			if _, dup := seen[key]; dup {
+				return
+			}
+			ip := randomAddrInPrefixV4(sp, s.rng)
+			if s.isExcluded(ip) {
+				return
+			}
+			seen[key] = struct{}{}
+			out = append(out, ip)
+		})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no IPv4 addresses enumerated from %d CIDRs after excludes", len(cidrs))
+	}
+	return out, nil
+}
+
+// forEachIPv4Slash24 invokes fn once for every /24 prefix contained in pfx,
+// which must be a masked IPv4 prefix with bits <= 24. It reproduces cfst's
+// chooseIPv4 walk: the third octet steps through every value in range so each
+// /24 is visited exactly once (e.g. a /13 yields 2048 blocks, a /22 yields 4).
+func forEachIPv4Slash24(pfx netip.Prefix, fn func(netip.Prefix)) {
+	b := pfx.Addr().As4()
+	blocks := 1 << (24 - pfx.Bits())
+	for i := 0; i < blocks; i++ {
+		sp, _ := netip.AddrFrom4(b).Prefix(24)
+		fn(sp)
+		// Advance to the next /24 by incrementing the third octet, carrying
+		// into the upper octets — identical to cfst's firstIP[14]++ walk.
+		b[2]++
+		if b[2] == 0 {
+			b[1]++
+			if b[1] == 0 {
+				b[0]++
+			}
+		}
+	}
+}
+
 func (s *Sampler) pickRandomIPv4(cidrs []string) (netip.Addr, error) {
 	pfx, err := s.randomPrefix(cidrs)
 	if err != nil {

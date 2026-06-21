@@ -21,6 +21,11 @@ import (
 const (
 	defaultTCPTimeout      = time.Second
 	defaultDownloadTimeout = 10 * time.Second
+
+	// SampleModeCFST selects CloudflareSpeedTest's default IPv4 sampling —
+	// walk every /24 and take one random IP per /24 — instead of drawing a
+	// fixed-size random subset. See cidrsample.EnumerateIPv4.
+	SampleModeCFST = "cfst"
 )
 
 // Runner is a one-shot pipeline execution.
@@ -56,6 +61,13 @@ type Runner struct {
 
 	// SampleCount: how many IPs to draw per family before probing.
 	SampleCount int
+
+	// SampleMode selects the IPv4 sampling strategy. "" or "random" (default)
+	// draws SampleCount IPs, at most one per /24; SampleModeCFST ("cfst")
+	// mirrors CloudflareSpeedTest's default walk over every /24 for full
+	// coverage (~5900 candidates on the built-in list). IPv6 always samples
+	// randomly regardless — an IPv6 /32 cannot be enumerated.
+	SampleMode string
 
 	// FWMark is applied to every probe socket via SO_MARK on Linux.
 	// Zero leaves sockets unmarked. Used to bypass router-level proxies
@@ -124,6 +136,11 @@ func (r Runner) Run(ctx context.Context) (dp.FastIPSet, error) {
 		sampleCount = 100
 	}
 
+	sampleMode := r.SampleMode
+	if sampleMode != SampleModeCFST {
+		sampleMode = "random"
+	}
+
 	topN := r.TopN
 	if topN <= 0 {
 		topN = 10
@@ -136,6 +153,7 @@ func (r Runner) Run(ctx context.Context) (dp.FastIPSet, error) {
 		zap.Int("cidr_excludes", len(sampler.Excludes)),
 		zap.Bool("ipv6_enabled", r.IPv6),
 		zap.Uint16("port", r.Port),
+		zap.String("sample_mode", sampleMode),
 		zap.Int("sample_count", sampleCount),
 		zap.Int("top_n", topN),
 		zap.String("download_url", r.DownloadURL),
@@ -144,7 +162,14 @@ func (r Runner) Run(ctx context.Context) (dp.FastIPSet, error) {
 	var v4Addrs, v6Addrs []netip.Addr
 	var err error
 	if len(v4CIDRs) > 0 {
-		v4Addrs, err = sampler.SampleIPv4(v4CIDRs, sampleCount)
+		// cfst mode walks every /24 (full coverage, ~5900 candidates on the
+		// built-in list); otherwise draw a fixed-size random subset. IPv6
+		// always samples randomly below — a /32 cannot be enumerated.
+		if sampleMode == SampleModeCFST {
+			v4Addrs, err = sampler.EnumerateIPv4(v4CIDRs)
+		} else {
+			v4Addrs, err = sampler.SampleIPv4(v4CIDRs, sampleCount)
+		}
 		if err != nil {
 			return dp.FastIPSet{}, fmt.Errorf("sample IPv4: %w", err)
 		}
