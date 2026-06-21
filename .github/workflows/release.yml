@@ -8,6 +8,11 @@ on:
 jobs:
   build-release:
     runs-on: ubuntu-latest
+    permissions:
+      # Required for softprops/action-gh-release to create the release via
+      # GITHUB_TOKEN. Without it the Publish step fails with HTTP 403
+      # "Resource not accessible by integration".
+      contents: write
     steps:
       - uses: actions/checkout@v6
 
