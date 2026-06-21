@@ -20,6 +20,8 @@
 package data_provider
 
 import (
+	"net/netip"
+
 	"github.com/IrineSistiana/mosdns/v5/pkg/matcher/domain"
 	"github.com/IrineSistiana/mosdns/v5/pkg/matcher/netlist"
 )
@@ -30,4 +32,17 @@ type DomainMatcherProvider interface {
 
 type IPMatcherProvider interface {
 	GetIPMatcher() netlist.Matcher
+}
+
+// FastIPSet is a snapshot of the currently selected "fast" IPs, partitioned
+// by address family. Values are frozen at read time; callers must not mutate.
+type FastIPSet struct {
+	IPv4 []netip.Addr
+	IPv6 []netip.Addr
+}
+
+// FastIPProvider exposes the most recent fast-IP snapshot. Implementations
+// must be safe for concurrent reads.
+type FastIPProvider interface {
+	GetFastIPs() FastIPSet
 }
