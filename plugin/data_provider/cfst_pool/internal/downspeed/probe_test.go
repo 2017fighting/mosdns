@@ -50,7 +50,10 @@ func TestProbe_UnreachableFails(t *testing.T) {
 func TestProbe_AbortsOnTimeout(t *testing.T) {
 	// Server that stalls forever; probe must respect Timeout.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(5 * time.Second)
+		select {
+		case <-time.After(5 * time.Second):
+		case <-r.Context().Done():
+		}
 	}))
 	defer srv.Close()
 

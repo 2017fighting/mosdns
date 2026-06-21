@@ -71,6 +71,12 @@ func (p Probe) Probe(dialIP string, testURL string, addr netip.Addr) Result {
 			return dialer.DialContext(ctx, network, net.JoinHostPort(dialIP, fmt.Sprintf("%d", port)))
 		},
 	}
+
+	// Timeout enforcement: http.Client.Timeout bounds the full request (dial +
+	// TLS + headers + body read) and triggers a context cancellation that
+	// aborts the body Read below. The loop's time.Since(start) check is a
+	// belt-and-suspenders guard for cases where Read returns tiny chunks
+	// faster than the goroutine scheduler yields to the context cancellation.
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   p.Timeout,
