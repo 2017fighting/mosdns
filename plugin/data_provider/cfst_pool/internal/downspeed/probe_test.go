@@ -72,6 +72,46 @@ func TestProbe_AbortsOnTimeout(t *testing.T) {
 	}
 }
 
+// TestProbe_StreamingTimeoutReportsSpeed reproduces the real-world failure
+// for which the read loop was fixed: a speed-test endpoint that STREAMS a
+// payload larger than the probe can finish within Timeout. The probe must
+// treat the inevitable mid-stream timeout as the NORMAL end of the test and
+// report the throughput measured so far — NOT as a "read body" error.
+//
+// This mirrors cfst's downloadHandler, which breaks on a non-EOF read error
+// and returns its accumulated EWMA. Discarding the IP here is what emptied
+// the pool even when fast IPs (cfst reference measured 27 MB/s on a
+// neighboring 104.17.x address) were downloading fine.
+func TestProbe_StreamingTimeoutReportsSpeed(t *testing.T) {
+	// Stream 64KB chunks forever. Loopback drains them fast, so totalRead
+	// is comfortably > 0 long before the 300ms timeout cuts the request.
+	chunk := make([]byte, 64*1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher, _ := w.(http.Flusher)
+		for {
+			if _, err := w.Write(chunk); err != nil {
+				return // client gone
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}))
+	defer srv.Close()
+
+	p := Probe{
+		Timeout: 300 * time.Millisecond,
+		HTTPS:   false,
+	}
+	r := p.Probe(context.Background(), "127.0.0.1", srv.URL, netip.MustParseAddr("127.0.0.1"))
+	if r.Err != nil {
+		t.Fatalf("streaming timeout after data must not be an error, got: %v", r.Err)
+	}
+	if r.BytesPerSec <= 0 {
+		t.Fatalf("expected positive BytesPerSec after partial stream, got %v", r.BytesPerSec)
+	}
+}
+
 // TestProbe_FWMarkExercisesControl verifies that a non-zero FWMark wires
 // through to the dialer's Control hook. On Linux SO_MARK requires
 // CAP_NET_ADMIN; without it the kernel returns EPERM, which we tolerate

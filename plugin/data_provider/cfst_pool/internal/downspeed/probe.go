@@ -141,13 +141,10 @@ readLoop:
 				r.BytesPerSec = e.Value() / (p.Timeout.Seconds() / 120)
 			}
 		case <-reqCtx.Done():
-			// Parent cancellation or Timeout deadline fired. Bail out
-			// with whatever EWMA we have so far; the runner treats this
-			// as a failed probe and skips the IP.
-			if reqCtx.Err() != nil && totalRead == 0 {
-				r.Err = fmt.Errorf("read body: %w", reqCtx.Err())
-				return r
-			}
+			// Parent cancellation or Timeout deadline fired while not
+			// blocked in Read. Fall through to the final EWMA computation
+			// below, reporting whatever throughput was measured. Only a
+			// probe that never received a payload byte is a real failure.
 			break readLoop
 		default:
 		}
@@ -159,8 +156,20 @@ readLoop:
 			break
 		}
 		if readErr != nil {
-			r.Err = fmt.Errorf("read body: %w", readErr)
-			return r
+			// A non-EOF read error is the NORMAL end of a streaming speed
+			// test: the payload is larger than fits in Timeout, so
+			// client.Timeout / reqCtx fires mid-stream and Read returns
+			// "context deadline exceeded" (or a reset on a flaky link).
+			// cfst's downloadHandler breaks here and returns its accumulated
+			// EWMA; we do the same, failing only when not a single payload
+			// byte arrived — a genuine connect/TLS/empty-body failure, not
+			// a normal cutoff. Treating the cutoff as an error is what
+			// emptied the pool even for fast IPs that were mid-download.
+			if totalRead == 0 {
+				r.Err = fmt.Errorf("read body: %w", readErr)
+				return r
+			}
+			break
 		}
 		if time.Since(start) >= p.Timeout {
 			break
