@@ -9,6 +9,8 @@ import (
 	"sort"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/IrineSistiana/mosdns/v5/plugin/data_provider/cfst_pool/internal/cidrsample"
 	"github.com/IrineSistiana/mosdns/v5/plugin/data_provider/cfst_pool/internal/downspeed"
 	"github.com/IrineSistiana/mosdns/v5/plugin/data_provider/cfst_pool/internal/scorer"
@@ -53,6 +55,20 @@ type Runner struct {
 	// Zero leaves sockets unmarked. Used to bypass router-level proxies
 	// that would invalidate the measurement.
 	FWMark uint32
+
+	// Log receives per-stage diagnostics. Nil → discard (test path).
+	// Production wires bp.L() so the operator sees where the pipeline
+	// drops candidates when an empty FastIPSet would otherwise be a mystery.
+	Log *zap.Logger
+}
+
+// logger returns the configured logger or a no-op sink so the runner stays
+// safe to call from tests that never set Log.
+func (r Runner) logger() *zap.Logger {
+	if r.Log == nil {
+		return zap.NewNop()
+	}
+	return r.Log
 }
 
 // Run executes the pipeline and returns the selected IPs.
@@ -61,7 +77,14 @@ type Runner struct {
 // download) so the caller can abort an in-flight scan early — primarily
 // used by the plugin's shutdown path so mosdns's Close is not held hostage
 // to a multi-minute scan running to completion.
+//
+// Stage-level counts are logged at Info so the operator can see exactly
+// which stage drops candidates when the final set is smaller than expected
+// (or empty). Per-IP probe failures are logged at Debug to avoid spamming
+// the default-level log stream when hundreds of candidates fail.
 func (r Runner) Run(ctx context.Context) (dp.FastIPSet, error) {
+	log := r.logger()
+
 	if len(r.CIDRs) == 0 {
 		return dp.FastIPSet{}, fmt.Errorf("no CIDRs configured")
 	}
@@ -77,6 +100,22 @@ func (r Runner) Run(ctx context.Context) (dp.FastIPSet, error) {
 		sampleCount = 100
 	}
 
+	topN := r.TopN
+	if topN <= 0 {
+		topN = 10
+	}
+
+	log.Info("cfst_pool: scan starting",
+		zap.Int("cidrs_total", len(r.CIDRs)),
+		zap.Int("v4_cidrs", len(v4CIDRs)),
+		zap.Int("v6_cidrs", len(v6CIDRs)),
+		zap.Bool("ipv6_enabled", r.IPv6),
+		zap.Uint16("port", r.Port),
+		zap.Int("sample_count", sampleCount),
+		zap.Int("top_n", topN),
+		zap.String("download_url", r.DownloadURL),
+	)
+
 	var v4Addrs, v6Addrs []netip.Addr
 	var err error
 	if len(v4CIDRs) > 0 {
@@ -91,6 +130,11 @@ func (r Runner) Run(ctx context.Context) (dp.FastIPSet, error) {
 			return dp.FastIPSet{}, fmt.Errorf("sample IPv6: %w", err)
 		}
 	}
+
+	log.Info("cfst_pool: sampled candidates",
+		zap.Int("v4", len(v4Addrs)),
+		zap.Int("v6", len(v6Addrs)),
+	)
 
 	if err := ctx.Err(); err != nil {
 		return dp.FastIPSet{}, fmt.Errorf("runner: %w", err)
@@ -110,6 +154,11 @@ func (r Runner) Run(ctx context.Context) (dp.FastIPSet, error) {
 	v4Reach := tcp.Probe(ctx, v4Addrs)
 	v6Reach := tcp.Probe(ctx, v6Addrs)
 
+	logTCPStats(log, "v4", v4Addrs, v4Reach)
+	if r.IPv6 {
+		logTCPStats(log, "v6", v6Addrs, v6Reach)
+	}
+
 	if err := ctx.Err(); err != nil {
 		return dp.FastIPSet{}, fmt.Errorf("runner: %w", err)
 	}
@@ -125,18 +174,13 @@ func (r Runner) Run(ctx context.Context) (dp.FastIPSet, error) {
 		FWMark:  r.FWMark,
 	}
 
-	topN := r.TopN
-	if topN <= 0 {
-		topN = 10
-	}
-
 	// Probe only topN candidates by TCP latency, matching cfst's TestCount.
 	// Sequential probing (inside probeDownloads) avoids tripping Cloudflare's
 	// edge WAF, which 429s parallel requests from a single source.
-	v4Candidates := probeDownloads(ctx, dl, v4Reach, r.DownloadURL, topN)
+	v4Candidates := probeDownloads(ctx, dl, v4Reach, r.DownloadURL, topN, "v4", log)
 	var v6Candidates []scorer.Candidate
 	if r.IPv6 {
-		v6Candidates = probeDownloads(ctx, dl, v6Reach, r.DownloadURL, topN)
+		v6Candidates = probeDownloads(ctx, dl, v6Reach, r.DownloadURL, topN, "v6", log)
 	}
 
 	set := dp.FastIPSet{}
@@ -148,7 +192,35 @@ func (r Runner) Run(ctx context.Context) (dp.FastIPSet, error) {
 			set.IPv6 = append(set.IPv6, c.Addr)
 		}
 	}
+
+	log.Info("cfst_pool: scan complete",
+		zap.Int("v4_selected", len(set.IPv4)),
+		zap.Int("v6_selected", len(set.IPv6)),
+	)
 	return set, nil
+}
+
+// logTCPStats reports TCP probe aggregate outcomes per family. When every
+// sampled IP failed, surfacing the first error explains WHY the set is
+// empty (e.g. all dials refused → upstream port closed / firewall).
+func logTCPStats(log *zap.Logger, family string, sampled []netip.Addr, reach []tcping.Result) {
+	reachable := 0
+	var firstErr error
+	for _, res := range reach {
+		if res.Err == nil && res.AvgRTT > 0 {
+			reachable++
+			continue
+		}
+		if firstErr == nil && res.Err != nil {
+			firstErr = res.Err
+		}
+	}
+	log.Info("cfst_pool: tcp probe complete",
+		zap.String("family", family),
+		zap.Int("sampled", len(sampled)),
+		zap.Int("reachable", reachable),
+		zap.NamedError("first_err", firstErr),
+	)
 }
 
 func splitCIDRsByFamily(cidrs []string) (v4, v6 []string) {
@@ -177,7 +249,12 @@ func splitCIDRsByFamily(cidrs []string) (v4, v6 []string) {
 //
 // The ctx is checked between each sequential probe so a canceled scan
 // (e.g. plugin shutdown) does not wait behind the remaining N-1 downloads.
-func probeDownloads(ctx context.Context, dl downspeed.Probe, reach []tcping.Result, downloadURL string, maxProbes int) []scorer.Candidate {
+//
+// log and family are used to emit per-stage outcome stats. Per-IP download
+// failures are logged at Debug; the aggregate (success/total + sample err)
+// is logged at Info so the operator can see at a glance whether the
+// download stage is what emptied the candidate pool.
+func probeDownloads(ctx context.Context, dl downspeed.Probe, reach []tcping.Result, downloadURL string, maxProbes int, family string, log *zap.Logger) []scorer.Candidate {
 	filtered := make([]tcping.Result, 0, len(reach))
 	for _, res := range reach {
 		if res.Err == nil && res.AvgRTT > 0 {
@@ -192,12 +269,38 @@ func probeDownloads(ctx context.Context, dl downspeed.Probe, reach []tcping.Resu
 	}
 
 	candidates := make([]scorer.Candidate, 0, len(filtered))
+	var firstErr error
 	for _, res := range filtered {
 		if err := ctx.Err(); err != nil {
+			log.Info("cfst_pool: download probe aborted",
+				zap.String("family", family),
+				zap.Int("probed", len(candidates)),
+				zap.Int("remaining", len(filtered)-len(candidates)),
+				zap.NamedError("err", err),
+			)
 			break
 		}
 		dlResult := dl.Probe(ctx, res.Addr.String(), downloadURL, res.Addr)
-		if dlResult.Err != nil || dlResult.BytesPerSec <= 0 {
+		if dlResult.Err != nil {
+			if firstErr == nil {
+				firstErr = dlResult.Err
+			}
+			log.Debug("cfst_pool: download probe failed",
+				zap.String("family", family),
+				zap.Stringer("addr", res.Addr),
+				zap.Error(dlResult.Err),
+			)
+			continue
+		}
+		if dlResult.BytesPerSec <= 0 {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("bytes_per_sec=%g", dlResult.BytesPerSec)
+			}
+			log.Debug("cfst_pool: download probe returned zero throughput",
+				zap.String("family", family),
+				zap.Stringer("addr", res.Addr),
+				zap.Float64("bytes_per_sec", dlResult.BytesPerSec),
+			)
 			continue
 		}
 		candidates = append(candidates, scorer.Candidate{
@@ -206,5 +309,11 @@ func probeDownloads(ctx context.Context, dl downspeed.Probe, reach []tcping.Resu
 			BytesPerSec: dlResult.BytesPerSec,
 		})
 	}
+	log.Info("cfst_pool: download probe complete",
+		zap.String("family", family),
+		zap.Int("tcp_reachable", len(filtered)),
+		zap.Int("download_ok", len(candidates)),
+		zap.NamedError("first_err", firstErr),
+	)
 	return candidates
 }

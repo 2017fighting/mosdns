@@ -61,6 +61,9 @@ func Init(bp *coremain.BP, args any) (any, error) {
 	}
 
 	// Build runner. Duration fields in Args are int seconds; convert at use.
+	// Log wires bp.L() so the operator can see per-stage diagnostics when
+	// a refresh produces an empty set — without it, the silent pipeline
+	// gives no clue which stage (sample/TCP/download) dropped candidates.
 	r := runner.Runner{
 		CIDRs:           cidrs,
 		Port:            a.Port,
@@ -75,6 +78,7 @@ func Init(bp *coremain.BP, args any) (any, error) {
 		Seed:            a.Seed,
 		SampleCount:     a.SampleCount,
 		FWMark:          a.FWMark,
+		Log:             bp.L(),
 	}
 
 	p := &Plugin{
