@@ -2,7 +2,8 @@
 package cidrsample
 
 // CloudflareIPv4CIDRs is the list of IPv4 CIDRs announced by Cloudflare.
-// Source: https://www.cloudflare.com/ips/ — same values cfst uses.
+// Source: https://www.cloudflare.com/ips/ — coarse ranges for broad sampling.
+// Note: cfst ships its own more granular list (ip.txt with 25 IPv4 + 100 IPv6 /48 prefixes).
 var CloudflareIPv4CIDRs = []string{
 	"173.245.48.0/20",
 	"103.21.244.0/22",
@@ -29,5 +30,5 @@ var CloudflareIPv6CIDRs = []string{
 	"2405:b500::/32",
 	"2405:8100::/32",
 	"2a06:98c0::/29",
-	"2c0f:f248::/29",
+	"2c0f:f248::/32",
 }
