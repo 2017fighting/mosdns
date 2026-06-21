@@ -3,10 +3,15 @@ package lpush
 import (
 	"context"
 	"net"
+	"net/netip"
 	"testing"
 
+	"github.com/IrineSistiana/mosdns/v5/coremain"
 	"github.com/IrineSistiana/mosdns/v5/pkg/query_context"
+	"github.com/IrineSistiana/mosdns/v5/plugin/data_provider"
+	"github.com/IrineSistiana/mosdns/v5/plugin/executable/sequence"
 	"github.com/miekg/dns"
+	"go.uber.org/zap"
 )
 
 func TestNewLPush(t *testing.T) {
@@ -307,4 +312,170 @@ func TestLPush_QuickSetup(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid IP, got nil")
 	}
+}
+
+// stubFastIPProvider implements data_provider.FastIPProvider for testing.
+type stubFastIPProvider struct {
+	ipv4 []netip.Addr
+	ipv6 []netip.Addr
+}
+
+func (s *stubFastIPProvider) GetFastIPs() data_provider.FastIPSet {
+	return data_provider.FastIPSet{
+		IPv4: s.ipv4,
+		IPv6: s.ipv6,
+	}
+}
+
+func TestLPush_DynamicMode(t *testing.T) {
+	// Create a stub provider returning known IPs.
+	stubProv := &stubFastIPProvider{
+		ipv4: []netip.Addr{netip.MustParseAddr("9.9.9.9")},
+		ipv6: []netip.Addr{netip.MustParseAddr("2001:db8::1")},
+	}
+
+	// Register it in a test mosdns instance.
+	plugins := map[string]any{
+		"stub_provider": stubProv,
+	}
+	m := coremain.NewTestMosdnsWithPlugins(plugins)
+	bq := sequence.NewBQ(m, zap.NewNop())
+
+	t.Run("dynamic mode looks up provider", func(t *testing.T) {
+		v, err := QuickSetup(bq, "$stub_provider")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		b, ok := v.(*LPush)
+		if !ok {
+			t.Fatalf("expected *LPush, got %T", v)
+		}
+		if b.provider == nil {
+			t.Fatal("provider should be set in dynamic mode")
+		}
+		if b.provider != stubProv {
+			t.Error("provider should be the stub instance")
+		}
+	})
+
+	t.Run("dynamic mode unknown tag fails", func(t *testing.T) {
+		_, err := QuickSetup(bq, "$nope")
+		if err == nil {
+			t.Fatal("expected error for unknown tag, got nil")
+		}
+	})
+
+	t.Run("dynamic mode empty tag fails", func(t *testing.T) {
+		_, err := QuickSetup(bq, "$")
+		if err == nil {
+			t.Fatal("expected error for empty tag, got nil")
+		}
+	})
+
+	t.Run("dynamic mode wrong type fails", func(t *testing.T) {
+		// Register a non-FastIPProvider plugin.
+		plugins2 := map[string]any{
+			"wrong_plugin": "not a provider",
+		}
+		m2 := coremain.NewTestMosdnsWithPlugins(plugins2)
+		bq2 := sequence.NewBQ(m2, zap.NewNop())
+
+		_, err := QuickSetup(bq2, "$wrong_plugin")
+		if err == nil {
+			t.Fatal("expected error for wrong type, got nil")
+		}
+	})
+
+	t.Run("Response uses provider IPs in dynamic mode", func(t *testing.T) {
+		v, err := QuickSetup(bq, "$stub_provider")
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := v.(*LPush)
+
+		// Test A query.
+		q := new(dns.Msg)
+		q.SetQuestion("example.", dns.TypeA)
+		r := b.Response(q)
+		if r == nil {
+			t.Fatal("expected response, got nil")
+		}
+		if len(r.Answer) != 1 {
+			t.Fatalf("expected 1 answer, got %d", len(r.Answer))
+		}
+		a, ok := r.Answer[0].(*dns.A)
+		if !ok {
+			t.Fatalf("expected *dns.A, got %T", r.Answer[0])
+		}
+		if !a.A.Equal(net.ParseIP("9.9.9.9")) {
+			t.Errorf("expected 9.9.9.9, got %s", a.A)
+		}
+
+		// Test AAAA query.
+		q6 := new(dns.Msg)
+		q6.SetQuestion("example.", dns.TypeAAAA)
+		r6 := b.Response(q6)
+		if r6 == nil {
+			t.Fatal("expected response, got nil")
+		}
+		if len(r6.Answer) != 1 {
+			t.Fatalf("expected 1 answer, got %d", len(r6.Answer))
+		}
+		aaaa, ok := r6.Answer[0].(*dns.AAAA)
+		if !ok {
+			t.Fatalf("expected *dns.AAAA, got %T", r6.Answer[0])
+		}
+		if !aaaa.AAAA.Equal(net.ParseIP("2001:db8::1")) {
+			t.Errorf("expected 2001:db8::1, got %s", aaaa.AAAA)
+		}
+	})
+
+	t.Run("dynamic mode Exec works correctly", func(t *testing.T) {
+		v, err := QuickSetup(bq, "$stub_provider")
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := v.(*LPush)
+
+		q := new(dns.Msg)
+		q.SetQuestion("example.", dns.TypeA)
+		qCtx := query_context.NewContext(q)
+
+		if err := b.Exec(context.Background(), qCtx); err != nil {
+			t.Fatal(err)
+		}
+
+		r := qCtx.R()
+		if r == nil {
+			t.Fatal("expected response, got nil")
+		}
+		if len(r.Answer) != 1 {
+			t.Fatalf("expected 1 answer, got %d", len(r.Answer))
+		}
+		a := r.Answer[0].(*dns.A)
+		if !a.A.Equal(net.ParseIP("9.9.9.9")) {
+			t.Errorf("expected 9.9.9.9, got %s", a.A)
+		}
+	})
+
+	t.Run("literal mode preserves existing behavior", func(t *testing.T) {
+		v, err := QuickSetup(bq, "1.1.1.1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, ok := v.(*LPush)
+		if !ok {
+			t.Fatalf("expected *LPush, got %T", v)
+		}
+		if len(b.ipv4) != 1 {
+			t.Fatalf("expected 1 ipv4, got %d", len(b.ipv4))
+		}
+		expectedIP := netip.MustParseAddr("1.1.1.1")
+		if b.ipv4[0] != expectedIP {
+			t.Errorf("expected 1.1.1.1, got %s", b.ipv4[0])
+		}
+		if b.provider != nil {
+			t.Error("provider should be nil in literal mode")
+		}
+	})
 }
