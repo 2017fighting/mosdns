@@ -5,6 +5,7 @@ package runner
 import (
 	"fmt"
 	"net/netip"
+	"sort"
 	"time"
 
 	"github.com/IrineSistiana/mosdns/v5/plugin/data_provider/cfst_pool/internal/cidrsample"
@@ -103,42 +104,20 @@ func (r Runner) Run() (dp.FastIPSet, error) {
 		Port:    r.Port,
 	}
 
-	v4Candidates := make([]scorer.Candidate, 0, len(v4Reach))
-	for _, res := range v4Reach {
-		if res.Err != nil || res.AvgRTT <= 0 {
-			continue
-		}
-		dlResult := dl.Probe(res.Addr.String(), r.DownloadURL, res.Addr)
-		if dlResult.Err != nil {
-			continue
-		}
-		v4Candidates = append(v4Candidates, scorer.Candidate{
-			Addr:        res.Addr,
-			AvgRTT:      res.AvgRTT,
-			BytesPerSec: dlResult.BytesPerSec,
-		})
-	}
-
-	var v6Candidates []scorer.Candidate
-	for _, res := range v6Reach {
-		if res.Err != nil || res.AvgRTT <= 0 {
-			continue
-		}
-		dlResult := dl.Probe(res.Addr.String(), r.DownloadURL, res.Addr)
-		if dlResult.Err != nil {
-			continue
-		}
-		v6Candidates = append(v6Candidates, scorer.Candidate{
-			Addr:        res.Addr,
-			AvgRTT:      res.AvgRTT,
-			BytesPerSec: dlResult.BytesPerSec,
-		})
-	}
-
 	topN := r.TopN
 	if topN <= 0 {
 		topN = 10
 	}
+
+	// Probe only topN candidates by TCP latency, matching cfst's TestCount.
+	// Sequential probing (inside probeDownloads) avoids tripping Cloudflare's
+	// edge WAF, which 429s parallel requests from a single source.
+	v4Candidates := probeDownloads(dl, v4Reach, r.DownloadURL, topN)
+	var v6Candidates []scorer.Candidate
+	if r.IPv6 {
+		v6Candidates = probeDownloads(dl, v6Reach, r.DownloadURL, topN)
+	}
+
 	set := dp.FastIPSet{}
 	for _, c := range scorer.SelectTopN(v4Candidates, topN) {
 		set.IPv4 = append(set.IPv4, c.Addr)
@@ -164,4 +143,41 @@ func splitCIDRsByFamily(cidrs []string) (v4, v6 []string) {
 		}
 	}
 	return v4, v6
+}
+
+// probeDownloads picks the top `maxProbes` TCP-reachable IPs (by lowest
+// AvgRTT), then probes them for download throughput SEQUENTIALLY.
+//
+// Sequential is deliberate: Cloudflare's edge WAF rate-limits parallel
+// requests from a single source IP to speed.cloudflare.com and 429s them.
+// cfst itself probes one IP at a time and gets 200 OK; we replicate that.
+// Probing N IPs at T seconds each costs N*T wall-clock — acceptable for a
+// background refresh that runs hourly.
+func probeDownloads(dl downspeed.Probe, reach []tcping.Result, downloadURL string, maxProbes int) []scorer.Candidate {
+	filtered := make([]tcping.Result, 0, len(reach))
+	for _, res := range reach {
+		if res.Err == nil && res.AvgRTT > 0 {
+			filtered = append(filtered, res)
+		}
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].AvgRTT < filtered[j].AvgRTT
+	})
+	if len(filtered) > maxProbes {
+		filtered = filtered[:maxProbes]
+	}
+
+	candidates := make([]scorer.Candidate, 0, len(filtered))
+	for _, res := range filtered {
+		dlResult := dl.Probe(res.Addr.String(), downloadURL, res.Addr)
+		if dlResult.Err != nil || dlResult.BytesPerSec <= 0 {
+			continue
+		}
+		candidates = append(candidates, scorer.Candidate{
+			Addr:        res.Addr,
+			AvgRTT:      res.AvgRTT,
+			BytesPerSec: dlResult.BytesPerSec,
+		})
+	}
+	return candidates
 }

@@ -4,7 +4,6 @@ package cfst_pool
 
 import (
 	"fmt"
-	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -21,11 +20,18 @@ import (
 //	-dn   → download_seconds
 //	-dt   → download_timeout
 //	-url  → download_url
+//
+// Duration fields (download_seconds, download_timeout, refresh_interval) are
+// expressed as integer SECONDS, not Go time.Duration strings. mosdns core
+// decodes plugin args via mapstructure with WeaklyTypedInput, which would
+// silently turn a bare YAML int into nanoseconds when the target field is
+// time.Duration (so `download_timeout: 5` becomes 5ns, breaking every
+// probe). Using int seconds sidesteps that footgun.
 type Args struct {
 	// DownloadSeconds is the time budget per download probe. cfst -dn. Default 10.
 	DownloadSeconds int `yaml:"download_seconds"`
-	// DownloadTimeout bounds a single download attempt. cfst -dt. Default 10s.
-	DownloadTimeout time.Duration `yaml:"download_timeout"`
+	// DownloadTimeout bounds a single download attempt, in seconds. cfst -dt. Default = DownloadSeconds.
+	DownloadTimeout int `yaml:"download_timeout"`
 	// SampleCount is the number of IPs to draw per family. cfst -n. Default 100.
 	SampleCount int `yaml:"sample_count"`
 	// DownloadURL is the test file URL. Required.
@@ -38,8 +44,8 @@ type Args struct {
 	Routines int `yaml:"routines"`
 	// TopN is how many IPs per family to retain. Default 10.
 	TopN int `yaml:"top_n"`
-	// RefreshInterval is the background rescan period. Default 1h.
-	RefreshInterval time.Duration `yaml:"refresh_interval"`
+	// RefreshInterval is the background rescan period, in seconds. Default 3600.
+	RefreshInterval int `yaml:"refresh_interval"`
 	// CacheFile is the on-disk persistence path. Default empty (no persistence).
 	CacheFile string `yaml:"cache_file"`
 	// IPv6 enables IPv6 sampling. Default false.
@@ -51,15 +57,10 @@ type Args struct {
 	CIDRs []string `yaml:"cidrs"`
 }
 
-// ParseArgs deserializes YAML and applies defaults.
-func ParseArgs(b []byte) (Args, error) {
-	var a Args
-	if err := yaml.Unmarshal(b, &a); err != nil {
-		return Args{}, fmt.Errorf("parse cfst_pool args: %w", err)
-	}
-	if a.DownloadURL == "" {
-		return Args{}, fmt.Errorf("cfst_pool: download_url is required")
-	}
+// applyDefaults fills in zero-valued fields with the documented defaults.
+// Called by ParseArgs (test path) and Init (production path, since mosdns
+// core's WeakDecode bypasses ParseArgs).
+func (a *Args) applyDefaults() {
 	if a.SampleCount <= 0 {
 		a.SampleCount = 100
 	}
@@ -67,7 +68,7 @@ func ParseArgs(b []byte) (Args, error) {
 		a.DownloadSeconds = 10
 	}
 	if a.DownloadTimeout <= 0 {
-		a.DownloadTimeout = time.Duration(a.DownloadSeconds) * time.Second
+		a.DownloadTimeout = a.DownloadSeconds
 	}
 	if a.Port == 0 {
 		a.Port = 443
@@ -82,10 +83,22 @@ func ParseArgs(b []byte) (Args, error) {
 		a.TopN = 10
 	}
 	if a.RefreshInterval <= 0 {
-		a.RefreshInterval = time.Hour
+		a.RefreshInterval = 3600
 	}
 	if a.Seed == 0 {
 		a.Seed = 1
 	}
+}
+
+// ParseArgs deserializes YAML and applies defaults.
+func ParseArgs(b []byte) (Args, error) {
+	var a Args
+	if err := yaml.Unmarshal(b, &a); err != nil {
+		return Args{}, fmt.Errorf("parse cfst_pool args: %w", err)
+	}
+	if a.DownloadURL == "" {
+		return Args{}, fmt.Errorf("cfst_pool: download_url is required")
+	}
+	a.applyDefaults()
 	return a, nil
 }

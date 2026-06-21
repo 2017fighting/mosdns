@@ -47,7 +47,7 @@ func (p Probe) Probe(dialIP string, testURL string, addr netip.Addr) Result {
 		return r
 	}
 
-	dialer := &net.Dialer{Timeout: p.Timeout}
+	dialer := &net.Dialer{}
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			port := p.Port
@@ -90,6 +90,10 @@ func (p Probe) Probe(dialIP string, testURL string, addr netip.Addr) Result {
 		r.Err = fmt.Errorf("build request: %w", err)
 		return r
 	}
+	// Match cfst's User-Agent. Without it, Cloudflare's edge WAF 429s the
+	// speed.cloudflare.com endpoint aggressively when many IPs are probed
+	// in quick succession.
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.80 Safari/537.36")
 
 	resp, err := client.Do(req)
 	if err != nil {

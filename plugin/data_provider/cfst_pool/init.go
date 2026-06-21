@@ -43,6 +43,10 @@ func Init(bp *coremain.BP, args any) (any, error) {
 		return nil, fmt.Errorf("cfst_pool: args is not *Args")
 	}
 
+	// Apply defaults. mosdns core decodes plugin args via mapstructure's
+	// WeakDecode, which bypasses ParseArgs — so we must apply defaults here.
+	a.applyDefaults()
+
 	// Build CIDR list
 	cidrs := a.CIDRs
 	if len(cidrs) == 0 {
@@ -52,7 +56,7 @@ func Init(bp *coremain.BP, args any) (any, error) {
 		}
 	}
 
-	// Build runner
+	// Build runner. Duration fields in Args are int seconds; convert at use.
 	r := runner.Runner{
 		CIDRs:           cidrs,
 		Port:            a.Port,
@@ -62,7 +66,7 @@ func Init(bp *coremain.BP, args any) (any, error) {
 		TCPTimeout:      time.Second,
 		HTTPS:           strings.HasPrefix(a.DownloadURL, "https://"),
 		DownloadURL:     a.DownloadURL,
-		DownloadTimeout: a.DownloadTimeout,
+		DownloadTimeout: time.Duration(a.DownloadTimeout) * time.Second,
 		TopN:            a.TopN,
 		Seed:            a.Seed,
 		SampleCount:     a.SampleCount,
@@ -125,7 +129,7 @@ func Init(bp *coremain.BP, args any) (any, error) {
 
 func (p *Plugin) refreshLoop(bp *coremain.BP) {
 	defer close(p.doneCh)
-	ticker := time.NewTicker(p.args.RefreshInterval)
+	ticker := time.NewTicker(time.Duration(p.args.RefreshInterval) * time.Second)
 	defer ticker.Stop()
 	for {
 		select {

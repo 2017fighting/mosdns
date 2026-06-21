@@ -30,12 +30,12 @@ plugins:
       download_url: https://cfst.raenzo.com/test
       port: 443
       sample_count: 100      # cfst -n
-      download_seconds: 5    # cfst -dn
-      download_timeout: 5s   # cfst -dt
+      download_seconds: 5    # cfst -dn (seconds)
+      download_timeout: 5    # cfst -dt (seconds)
       ping_times: 4
       routines: 200
       top_n: 10
-      refresh_interval: 1h
+      refresh_interval: 3600 # seconds (= 1h)
       cache_file: /var/lib/mosdns/cfst_pool.json
       ipv6: false
       seed: 42

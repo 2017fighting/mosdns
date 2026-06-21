@@ -37,7 +37,7 @@ download_seconds: 1
 top_n: 1
 cidrs:
   - 192.0.2.0/24
-refresh_interval: 100ms
+refresh_interval: 1
 `, cachePath)
 
 	args, err := ParseArgs([]byte(argsYAML))
@@ -75,7 +75,7 @@ download_seconds: 1
 top_n: 1
 cidrs:
   - 192.0.2.0/24
-refresh_interval: 100ms
+refresh_interval: 1
 `
 
 	args, err := ParseArgs([]byte(argsYAML))

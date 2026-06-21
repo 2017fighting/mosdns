@@ -2,20 +2,19 @@ package cfst_pool
 
 import (
 	"testing"
-	"time"
 )
 
 func TestArgs_Parse_HappyPath(t *testing.T) {
 	yaml := `
 download_seconds: 5
-download_timeout: 5s
+download_timeout: 5
 sample_count: 100
 download_url: https://cfst.raenzo.com/test
 port: 443
 ping_times: 4
 routines: 200
 top_n: 10
-refresh_interval: 1h
+refresh_interval: 3600
 cache_file: /var/lib/mosdns/cfst.json
 ipv6: false
 seed: 42
@@ -27,8 +26,8 @@ seed: 42
 	if a.DownloadSeconds != 5 {
 		t.Errorf("DownloadSeconds: want 5, got %d", a.DownloadSeconds)
 	}
-	if a.DownloadTimeout != 5*time.Second {
-		t.Errorf("DownloadTimeout: want 5s, got %v", a.DownloadTimeout)
+	if a.DownloadTimeout != 5 {
+		t.Errorf("DownloadTimeout: want 5, got %d", a.DownloadTimeout)
 	}
 	if a.SampleCount != 100 {
 		t.Errorf("SampleCount: want 100, got %d", a.SampleCount)
@@ -42,8 +41,8 @@ seed: 42
 	if a.TopN != 10 {
 		t.Errorf("TopN: want 10, got %d", a.TopN)
 	}
-	if a.RefreshInterval != time.Hour {
-		t.Errorf("RefreshInterval: want 1h, got %v", a.RefreshInterval)
+	if a.RefreshInterval != 3600 {
+		t.Errorf("RefreshInterval: want 3600, got %d", a.RefreshInterval)
 	}
 	if a.IPv6 {
 		t.Errorf("IPv6: want false, got true")
