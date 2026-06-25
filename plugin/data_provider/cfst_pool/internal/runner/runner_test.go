@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -132,5 +133,83 @@ func TestRun_SampleModeCFST_RoutesToEnumerate(t *testing.T) {
 	}
 	if !set.IPv4[0].IsLoopback() {
 		t.Errorf("expected loopback, got %v", set.IPv4[0])
+	}
+}
+
+func TestMergePrevious_EmptyPreviousIsPassthrough(t *testing.T) {
+	fresh := []netip.Addr{netip.MustParseAddr("1.1.1.1")}
+	out, added := mergePrevious(fresh, nil)
+	if added != 0 {
+		t.Errorf("added = %d, want 0", added)
+	}
+	if len(out) != 1 || out[0] != fresh[0] {
+		t.Errorf("out = %v, want %v unchanged", out, fresh)
+	}
+}
+
+func TestMergePrevious_AppendsNewAddrsAndCounts(t *testing.T) {
+	fresh := []netip.Addr{netip.MustParseAddr("1.1.1.1")}
+	prev := []netip.Addr{
+		netip.MustParseAddr("1.1.1.1"), // dup → skipped
+		netip.MustParseAddr("1.1.1.2"), // new → added
+		netip.MustParseAddr("1.1.1.3"), // new → added
+	}
+	out, added := mergePrevious(fresh, prev)
+	if added != 2 {
+		t.Fatalf("added = %d, want 2", added)
+	}
+	if len(out) != 3 {
+		t.Fatalf("len(out) = %d, want 3", len(out))
+	}
+	// Order: fresh first, then appended previous in order.
+	want := []netip.Addr{
+		netip.MustParseAddr("1.1.1.1"),
+		netip.MustParseAddr("1.1.1.2"),
+		netip.MustParseAddr("1.1.1.3"),
+	}
+	for i := range want {
+		if out[i] != want[i] {
+			t.Errorf("out[%d] = %v, want %v", i, out[i], want[i])
+		}
+	}
+}
+
+func TestMergePrevious_FamilyGuardDropsCrossFamily(t *testing.T) {
+	// Fresh is v4; a v6 previous addr must be skipped, not dialed on the v4 pool.
+	fresh := []netip.Addr{netip.MustParseAddr("1.1.1.1")}
+	prev := []netip.Addr{
+		netip.MustParseAddr("2606:4700::1"), // cross-family → skipped
+		netip.MustParseAddr("1.1.1.2"),      // same family → added
+	}
+	out, added := mergePrevious(fresh, prev)
+	if added != 1 {
+		t.Fatalf("added = %d, want 1 (cross-family skipped)", added)
+	}
+	for _, a := range out {
+		if a.Is6() {
+			t.Errorf("v6 addr %v leaked into v4 pool", a)
+		}
+	}
+}
+
+func TestMergePrevious_FreshEmptyInfersFamilyFromPrevious(t *testing.T) {
+	// No fresh sample; family taken from previous. v6 previous all kept.
+	prev := []netip.Addr{
+		netip.MustParseAddr("2606:4700::1"),
+		netip.MustParseAddr("2606:4700::2"),
+	}
+	out, added := mergePrevious(nil, prev)
+	if added != 2 {
+		t.Fatalf("added = %d, want 2", added)
+	}
+	if len(out) != 2 {
+		t.Fatalf("len(out) = %d, want 2", len(out))
+	}
+}
+
+func TestMergePrevious_BothEmptyReturnsNil(t *testing.T) {
+	out, added := mergePrevious(nil, nil)
+	if added != 0 || out != nil {
+		t.Errorf("out = %v added = %d, want nil/0", out, added)
 	}
 }

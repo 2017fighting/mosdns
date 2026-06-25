@@ -392,3 +392,48 @@ func probeDownloads(ctx context.Context, dl downspeed.Probe, reach []tcping.Resu
 	)
 	return candidates
 }
+
+// mergePrevious folds previous addrs into the fresh candidate pool, returning
+// the merged slice and the number of previous addrs actually added. A previous
+// addr is appended only if it is not already present in fresh (dedup) and
+// matches the pool's family.
+//
+// The expected family is taken from the first addr in fresh, or — when fresh
+// is empty — the first addr in previous. Both inputs are single-family by
+// construction (v4 pools come from v4 CIDRs; the caller passes Previous.IPv4
+// and Previous.IPv6 separately, already split), so this is well-defined. When
+// both are empty the result is (nil, 0).
+//
+// This lets the previously-elected IPs re-enter the next scan as candidates so
+// a still-good IP is not dropped merely because the random sampler did not
+// re-draw it this round.
+func mergePrevious(fresh, previous []netip.Addr) ([]netip.Addr, int) {
+	if len(previous) == 0 {
+		return fresh, 0
+	}
+	wantV6 := false
+	switch {
+	case len(fresh) > 0:
+		wantV6 = fresh[0].Is6()
+	default:
+		wantV6 = previous[0].Is6()
+	}
+	seen := make(map[netip.Addr]struct{}, len(fresh)+len(previous))
+	for _, a := range fresh {
+		seen[a] = struct{}{}
+	}
+	out := fresh
+	added := 0
+	for _, a := range previous {
+		if a.Is6() != wantV6 {
+			continue
+		}
+		if _, ok := seen[a]; ok {
+			continue
+		}
+		seen[a] = struct{}{}
+		out = append(out, a)
+		added++
+	}
+	return out, added
+}
