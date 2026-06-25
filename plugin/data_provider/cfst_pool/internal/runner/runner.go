@@ -70,6 +70,12 @@ type Runner struct {
 	// randomly regardless — an IPv6 /32 cannot be enumerated.
 	SampleMode string
 
+	// Previous holds the previously-elected IPs that should re-enter this scan
+	// as candidates (re-measured, not carried over). Empty on the first scan.
+	// Set per-call by the plugin from its current FastIPSet; defaults to empty
+	// so a Runner with Previous == zero value behaves exactly as before.
+	Previous dp.FastIPSet
+
 	// FWMark is applied to every probe socket via SO_MARK on Linux.
 	// Zero leaves sockets unmarked. Used to bypass router-level proxies
 	// that would invalidate the measurement.
@@ -182,9 +188,19 @@ func (r Runner) Run(ctx context.Context) (dp.FastIPSet, error) {
 		}
 	}
 
+	// Fold previously-elected IPs into the candidate pool so they re-enter this
+	// election on equal footing (re-measured downstream, not carried over).
+	v4PrevCount, v6PrevCount := 0, 0
+	v4Addrs, v4PrevCount = mergePrevious(v4Addrs, r.Previous.IPv4)
+	if r.IPv6 {
+		v6Addrs, v6PrevCount = mergePrevious(v6Addrs, r.Previous.IPv6)
+	}
+
 	log.Info("cfst_pool: sampled candidates",
 		zap.Int("v4", len(v4Addrs)),
 		zap.Int("v6", len(v6Addrs)),
+		zap.Int("v4_previous", v4PrevCount),
+		zap.Int("v6_previous", v6PrevCount),
 	)
 
 	if err := ctx.Err(); err != nil {

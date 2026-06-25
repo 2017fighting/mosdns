@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	dp "github.com/IrineSistiana/mosdns/v5/plugin/data_provider"
 )
 
 func TestRun_HappyPath_ProducesFastIPSet(t *testing.T) {
@@ -211,5 +213,90 @@ func TestMergePrevious_BothEmptyReturnsNil(t *testing.T) {
 	out, added := mergePrevious(nil, nil)
 	if added != 0 || out != nil {
 		t.Errorf("out = %v added = %d, want nil/0", out, added)
+	}
+}
+
+// TestRun_PreviousResultsCompeteAndWin proves Previous re-enters the election:
+// the fresh sample (192.0.2.0/30, RFC 5737 TEST-NET-1) is entirely unreachable,
+// so the ONLY way Run returns a non-empty set is if Previous is merged in and
+// wins on merit. Without the merge, Run returns an empty IPv4 set.
+func TestRun_PreviousResultsCompeteAndWin(t *testing.T) {
+	payload := strings.Repeat("x", 256*1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer srv.Close()
+
+	port := uint16(srv.Listener.Addr().(*net.TCPAddr).Port)
+
+	r := Runner{
+		CIDRs:           []string{"192.0.2.0/30"},
+		Port:            port,
+		PingTimes:       1,
+		Routines:        1,
+		TCPTimeout:      500 * time.Millisecond,
+		HTTPS:           false,
+		DownloadURL:     srv.URL,
+		DownloadTimeout: time.Second,
+		TopN:            1,
+		Seed:            42,
+		SampleCount:     1,
+		Previous: dp.FastIPSet{
+			IPv4: []netip.Addr{netip.MustParseAddr("127.0.0.1")},
+		},
+	}
+
+	set, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := netip.MustParseAddr("127.0.0.1")
+	if len(set.IPv4) != 1 || set.IPv4[0] != want {
+		t.Fatalf("expected Previous 127.0.0.1 to win; got %v", set.IPv4)
+	}
+}
+
+// TestRun_PreviousUnreachableDropped is a regression guard: when the fresh
+// sample is reachable and a Previous addr is not, the Previous addr must be
+// absent from the result (pure merit — no carry-over).
+func TestRun_PreviousUnreachableDropped(t *testing.T) {
+	payload := strings.Repeat("x", 256*1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer srv.Close()
+
+	port := uint16(srv.Listener.Addr().(*net.TCPAddr).Port)
+
+	r := Runner{
+		CIDRs:           []string{"127.0.0.1/32"},
+		Port:            port,
+		PingTimes:       1,
+		Routines:        1,
+		TCPTimeout:      500 * time.Millisecond,
+		HTTPS:           false,
+		DownloadURL:     srv.URL,
+		DownloadTimeout: time.Second,
+		TopN:            1,
+		Seed:            42,
+		SampleCount:     1,
+		Previous: dp.FastIPSet{
+			IPv4: []netip.Addr{netip.MustParseAddr("192.0.2.7")},
+		},
+	}
+
+	set, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := netip.MustParseAddr("127.0.0.1")
+	if len(set.IPv4) != 1 || set.IPv4[0] != want {
+		t.Fatalf("expected only reachable 127.0.0.1; got %v", set.IPv4)
+	}
+	dropped := netip.MustParseAddr("192.0.2.7")
+	for _, ip := range set.IPv4 {
+		if ip == dropped {
+			t.Fatalf("unreachable Previous addr %v must be dropped, not elected", dropped)
+		}
 	}
 }
