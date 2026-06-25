@@ -36,7 +36,7 @@ plugins:
       routines: 200
       top_n: 10
       refresh_interval: 3600 # seconds (= 1h)
-      cache_file: /var/lib/mosdns/cfst_pool.json
+      cache_file: /etc/mosdns/cfst_pool.json
       ipv6: false
       seed: 42
       # fwmark is applied via SO_MARK to every probe socket so the test
