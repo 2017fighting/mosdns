@@ -179,7 +179,17 @@ func (p *Plugin) signalHandler(bp *coremain.BP) {
 }
 
 func (p *Plugin) refresh(ctx context.Context, bp *coremain.BP) {
-	set, err := p.runner.Run(ctx)
+	// Forward the currently-served set so last round's winners re-enter this
+	// scan as candidates and survive only on merit. Copy p.runner (a value)
+	// and set Previous on the local copy — p.runner itself stays read-only,
+	// so the ticker and SIGUSR1 goroutines can call refresh concurrently with
+	// no mutex. p.current.Load() is atomic and the FastIPSet it points at is
+	// replaced via Store, never mutated in place, so *cur is safe to read.
+	r := p.runner
+	if cur := p.current.Load(); cur != nil {
+		r.Previous = *cur
+	}
+	set, err := r.Run(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			// Cancellation (typically shutdown) — don't warn at default
